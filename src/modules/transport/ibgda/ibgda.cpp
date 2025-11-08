@@ -89,7 +89,7 @@
 #define IBGDA_MAX(x, y) ((x) > (y) ? (x) : (y))
 
 #define IBGDA_ROUND_UP(V, SIZE) (((V) + (SIZE)-1) / (SIZE) * (SIZE))
-
+#define IBGDA_FREE(p) do { if (p) { free(p); p = NULL;}} while (0)
 #define IBGDA_ROUND_UP_POW2(_n)                 \
     ({                                          \
         typeof(_n) pow2 = 0;                    \
@@ -293,6 +293,9 @@ typedef struct {
     void *devices;
     int *dev_ids;
     int *port_ids;
+    int *backup_dev_ids;        // Backup device ID array
+    int *backup_port_ids;       // Backup port ID array
+    bool *is_single_port_card;  // Flag for single-port vs dual-port cards
     int *selected_dev_ids;
     int n_dev_ids;
     int n_devs_selected;
@@ -4421,6 +4424,102 @@ out:
     return status;
 }
 
+static int ibgda_create_backup_mapping(nvshmemt_ibgda_state_t *ibgda_state) {
+    int status = 0;
+    int n_dev_ids = ibgda_state->n_dev_ids;
+    struct ibgda_device *devices = (struct ibgda_device *)ibgda_state->devices;
+
+    INFO(ibgda_state->log_level, "Begin - Creating backup QP mappings for fault tolerance\n");
+
+    // Initialize backup arrays to -1 (no backup)
+    for (int i = 0; i < n_dev_ids; i++) {
+        ibgda_state->backup_dev_ids[i] = -1;
+        ibgda_state->backup_port_ids[i] = -1;
+        ibgda_state->is_single_port_card[i] = false;
+    }
+
+    // Process each device/port to create backup mappings
+    for (int i = 0; i < n_dev_ids; i++) {
+        int dev_id = ibgda_state->dev_ids[i];
+        int port_id = ibgda_state->port_ids[i];
+        struct ibgda_device *device = &devices[dev_id];
+        int phys_port_cnt = device->common_device.device_attr.phys_port_cnt;
+
+        // Skip if backup is already assigned
+        if (ibgda_state->backup_dev_ids[i] != -1) {
+            continue;
+        }
+
+        if (phys_port_cnt == 1) {
+            // Single-port card: pair with adjacent card (i XOR 1)
+            ibgda_state->is_single_port_card[i] = true;
+            int backup_idx = i ^ 1;  // XOR with 1 to get pair: 0<->1, 2<->3, 4<->5, 6<->7
+
+            if (backup_idx < n_dev_ids) {
+                int backup_dev_id = ibgda_state->dev_ids[backup_idx];
+                int backup_port_id = ibgda_state->port_ids[backup_idx];
+                struct ibgda_device *backup_device = &devices[backup_dev_id];
+
+                // Verify backup device is also single-port
+                if (backup_device->common_device.device_attr.phys_port_cnt == 1) {
+                    // Create bidirectional mapping
+                    ibgda_state->backup_dev_ids[i] = backup_dev_id;
+                    ibgda_state->backup_port_ids[i] = backup_port_id;
+                    ibgda_state->is_single_port_card[backup_idx] = true;
+                    ibgda_state->backup_dev_ids[backup_idx] = dev_id;
+                    ibgda_state->backup_port_ids[backup_idx] = port_id;
+
+                    INFO(ibgda_state->log_level,
+                         "Backup mapping (single-port): idx=%d (dev=%d, port=%d) <-> idx=%d (dev=%d, port=%d)\n",
+                         i, dev_id, port_id, backup_idx, backup_dev_id, backup_port_id);
+                } else {
+                    NVSHMEMI_WARN_PRINT(
+                        "Cannot create backup mapping for idx=%d: adjacent device has different port count\n", i);
+                }
+            } else {
+                NVSHMEMI_WARN_PRINT(
+                    "Cannot create backup mapping for idx=%d: no adjacent device available\n", i);
+            }
+        } else if (phys_port_cnt == 2) {
+            // Dual-port card: find the other port on the same device
+            ibgda_state->is_single_port_card[i] = false;
+            int backup_idx = -1;
+
+            for (int j = 0; j < n_dev_ids; j++) {
+                if (i != j && ibgda_state->dev_ids[j] == dev_id && 
+                    ibgda_state->port_ids[j] != port_id) {
+                    backup_idx = j;
+                    break;
+                }
+            }
+
+            if (backup_idx != -1) {
+                int backup_port_id = ibgda_state->port_ids[backup_idx];
+
+                // Create bidirectional mapping
+                ibgda_state->backup_dev_ids[i] = dev_id;  // Same device
+                ibgda_state->backup_port_ids[i] = backup_port_id;
+                ibgda_state->is_single_port_card[backup_idx] = false;
+                ibgda_state->backup_dev_ids[backup_idx] = dev_id;  // Same device
+                ibgda_state->backup_port_ids[backup_idx] = port_id;
+
+                INFO(ibgda_state->log_level,
+                     "Backup mapping (dual-port): idx=%d (dev=%d, port=%d) <-> idx=%d (dev=%d, port=%d)\n",
+                     i, dev_id, port_id, backup_idx, dev_id, backup_port_id);
+            } else {
+                NVSHMEMI_WARN_PRINT(
+                    "Cannot create backup mapping for idx=%d: no second port found on device %d\n", 
+                    i, dev_id);
+            }
+        } else {
+            NVSHMEMI_WARN_PRINT(
+                "Unsupported port count %d for device at idx=%d\n", phys_port_cnt, i);
+        }
+    }
+    INFO(ibgda_state->log_level, "End - Creating backup QP mappings\n");
+    return status;
+}
+
 int nvshmemt_init(nvshmem_transport_t *t, struct nvshmemi_cuda_fn_table *table, int api_version) {
     struct nvshmemt_hca_info hca_list[MAX_NUM_HCAS];
     struct nvshmemt_hca_info pe_hca_mapping[MAX_NUM_PES_PER_NODE];
@@ -4622,6 +4721,18 @@ int nvshmemt_init(nvshmem_transport_t *t, struct nvshmemi_cuda_fn_table *table, 
     ibgda_state->port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
     NVSHMEMI_NULL_ERROR_JMP(ibgda_state->port_ids, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
                             "malloc failed \n");
+
+    ibgda_state->backup_dev_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
+    NVSHMEMI_NULL_ERROR_JMP(ibgda_state->backup_dev_ids, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                            "malloc failed for backup_dev_ids\n");
+
+    ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
+    NVSHMEMI_NULL_ERROR_JMP(ibgda_state->backup_port_ids, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                            "malloc failed for backup_port_ids\n");
+
+    ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(bool));
+    NVSHMEMI_NULL_ERROR_JMP(ibgda_state->is_single_port_card, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                            "malloc failed for is_single_port_card\n");
     if (options->HCA_LIST_provided) {
         user_selection = 1;
         exclude_list = (options->HCA_LIST[0] == '^');
@@ -4881,6 +4992,11 @@ int nvshmemt_init(nvshmem_transport_t *t, struct nvshmemi_cuda_fn_table *table, 
         goto out;
     }
 
+    // Create backup QP mappings
+    status = ibgda_create_backup_mapping(ibgda_state);
+    NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                          "Failed to create backup QP mapping.\n");
+
     transport->n_devices = ibgda_state->n_dev_ids;
     transport->device_pci_paths = (char **)calloc(transport->n_devices, sizeof(char *));
     NVSHMEMI_NULL_ERROR_JMP(transport->device_pci_paths, status, NVSHMEMX_ERROR_INTERNAL, out,
@@ -4985,6 +5101,12 @@ out:
         if (transport) {
             if (transport->device_pci_paths) {
                 free(transport->device_pci_paths);
+            }
+            if (transport->state) {
+                nvshmemt_ibgda_state_t *state = (nvshmemt_ibgda_state_t *)transport->state;
+                IBGDA_FREE(state->backup_dev_ids);
+                IBGDA_FREE(state->backup_port_ids);
+                IBGDA_FREE(state->is_single_port_card);
             }
             free(transport);
         }
