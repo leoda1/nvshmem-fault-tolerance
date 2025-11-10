@@ -268,6 +268,12 @@ struct ibgda_device {
     struct {
         struct ibgda_ep **eps;
         struct ibgda_rc_handle *peer_ep_handles;
+
+        struct ibgda_ep **backup_eps;            // 备份 RC 端点
+        struct ibgda_rc_handle *backup_peer_ep_handles; // 备份 RC 对等句柄
+        int backup_dev_id;                       // 此设备的备份设备 ID
+        int backup_port_id;                      // 此设备的备份端口 ID
+        
         int num_eps_per_pe;
         nvshmemi_ibgda_device_qp_map_type_t map_by;
     } rc;
@@ -283,7 +289,9 @@ struct nvshmemt_ibgda_device_state_cache {
     nvshmemi_ibgda_device_qp_t *dci_h;
     nvshmemi_ibgda_device_dct_t *dct_h;
     nvshmemi_ibgda_device_cq_t *cq_h;
+    nvshmemi_ibgda_device_cq_t *backup_cq_h;
     nvshmemi_ibgda_device_qp_t *rc_h;
+    nvshmemi_ibgda_device_qp_t *backup_rc_h;
 };
 typedef struct nvshmemt_ibgda_device_state_cache *nvshmemt_ibgda_device_state_cache_t;
 
@@ -3107,6 +3115,13 @@ out:
     return status;
 }
 
+static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device,
+                                        int num_rc_eps) {
+    /*
+    */
+   ;
+}
+
 static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
                                     struct ibgda_device *device, int portid, nvshmem_transport_t t,
                                     int num_eps_per_pe) {
@@ -3192,6 +3207,17 @@ out:
         free(local_rc_handles);
     }
     return status;
+}
+
+static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
+                                    struct ibgda_device *device, struct ibgda_device *backup_device,
+                                    int backup_portid, nvshmem_transport_t t, int num_eps_per_pe) {
+    /* TODO:
+    // 1. 使用 backup_device 和 backup_portid
+    // 2. 将结果存储在 device->rc.backup_eps 和 device->rc.backup_peer_ep_handles
+    // 3. 通过独立的 alltoall 交换备份句柄
+    */
+   ;
 }
 
 static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
@@ -3894,6 +3920,26 @@ static int ibgda_connect_device_resources(nvshmemt_ibgda_state_t *ibgda_state,
     status = ibgda_create_dci_shared_objects(ibgda_state, device);
     if (status) return status;
 
+    // Initialize backup device/port mapping based on ibgda_state backup mappings
+    int backup_mapping_idx = -1;
+    for (int j = 0; j < ibgda_state->n_dev_ids; j++) {
+        if (ibgda_state->dev_ids[j] == dev_idx && 
+            ibgda_state->port_ids[j] == portid) {
+            backup_mapping_idx = j;
+            break;
+        }
+    }
+    if (backup_mapping_idx != -1) {
+        // Set backup device and port information in the RC structure
+        device->rc.backup_dev_id = ibgda_state->backup_dev_ids[backup_mapping_idx];
+        device->rc.backup_port_id = ibgda_state->backup_port_ids[backup_mapping_idx];
+        INFO(ibgda_state->log_level,
+             "Device dev_idx=%d port=%d has backup: dev_id=%d port=%d",
+             dev_idx, portid, device->rc.backup_dev_id, device->rc.backup_port_id);
+    } else {
+        device->rc.backup_dev_id = -1;
+        device->rc.backup_port_id = -1;
+    }
     return status;
 }
 
@@ -3914,6 +3960,15 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
     status = ibgda_setup_rc_endpoints(ibgda_state, device, portid, t,
                                       ibgda_state->options->IBGDA_NUM_RC_PER_PE);
     if (status) return status;
+    
+    // Setup Backup RC endpoints
+    if (device->rc.backup_dev_id != -1) {
+        struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices +
+                                                device->rc.backup_dev_id;
+        status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device,
+                                                    device->rc.backup_port_id, t);
+        if (status) return status;
+    }
 
     // Calculate global flags
     int n_pes = t->n_pes;
