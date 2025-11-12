@@ -275,6 +275,7 @@ struct ibgda_device {
         int backup_port_id;                      // 此设备的备份端口 ID
         
         int num_eps_per_pe;
+        int num_backup_eps_per_pe;
         nvshmemi_ibgda_device_qp_map_type_t map_by;
     } rc;
     bool support_nic_buf_on_gpumem;
@@ -3121,13 +3122,13 @@ static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibg
     allocate backup RC device structs start
     */
     int status = 0;
-    if (device->backup_peer_ep_handles == NULL) {
+    if (device->rc.backup_peer_ep_handles == NULL) {
         device->rc.backup_peer_ep_handles =
             (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*device->rc.backup_peer_ep_handles));
     } else {
-        size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+        size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
         device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(
-        device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
+            device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
     }
     NVSHMEMI_NULL_ERROR_JMP(device->rc.backup_peer_ep_handles, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
                            "allocation of rc.backup_peer_ep_handles failed.");
@@ -3135,7 +3136,7 @@ static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibg
    if (device->rc.backup_eps == NULL) {
        device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
    } else {
-       size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+       size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
        device->rc.backup_eps =
            (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
    }
@@ -3242,7 +3243,7 @@ static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
     int mype = t->my_pe;
     int num_rc_eps = num_eps_per_pe * n_pes;
     struct ibgda_rc_handle *local_backup_rc_handles = NULL;
-    int rc_first_index = device->rc.num_eps_per_pe * n_pes;
+    int rc_first_index = device->rc.num_backup_eps_per_pe * n_pes;
     
     if (num_rc_eps <= 0) return NVSHMEMX_SUCCESS;
     /* allocate local backup RC handles start */
@@ -3312,7 +3313,8 @@ static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
         }
     }
     /* QP state transitions end */
-
+    device->rc.num_backup_eps_per_pe += num_eps_per_pe;
+    ibgda_state->cur_qp_index += num_rc_eps;
     INFO(ibgda_state->log_level, "Backup RC endpoints setup completed successfully");
 
 out:
@@ -3580,8 +3582,8 @@ static int ibgda_post_gpu_device_state(
     nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
     nvshmemi_ibgda_device_state_t *ibgda_device_state_h, nvshmemi_ibgda_device_qp_t *dci_d,
     nvshmemi_ibgda_device_qp_t *rc_d, nvshmemi_ibgda_device_dct_t *dct_d,
-    nvshmemi_ibgda_device_cq_t *cq_d, uint8_t *qp_group_switches_d, int num_qp_groups,
-    int num_shared_dci_handles, int num_dci_handles, int num_dct_handles, int num_rc_handles,
+    nvshmemi_ibgda_device_cq_t *cq_d, nvshmemi_ibgda_device_qp_t *backup_rc_d, uint8_t *qp_group_switches_d, int num_qp_groups,
+    int num_shared_dci_handles, int num_dci_handles, int num_dct_handles, int num_rc_handles, int num_backup_rc_handles,
     int n_devs_selected, nvshmemi_ibgda_device_qp_map_type_t dc_map_type,
     nvshmemi_ibgda_device_qp_map_type_t rc_map_type, bool support_half_av_seg, bool skip_cst) {
     int status = 0;
@@ -3595,6 +3597,7 @@ static int ibgda_post_gpu_device_state(
     ibgda_device_state_h->globalmem.rcs = rc_d;
     ibgda_device_state_h->globalmem.dcts = dct_d;
     ibgda_device_state_h->globalmem.cqs = cq_d;
+    ibgda_device_state_h->globalmem.backup_rcs = backup_rc_d;
 
     ibgda_device_state_h->num_qp_groups = num_qp_groups;
     ibgda_device_state_h->log2_cumem_granularity = t->log2_cumem_granularity;
@@ -3605,6 +3608,7 @@ static int ibgda_post_gpu_device_state(
     ibgda_device_state_h->num_dct_groups = IBGDA_MAX(
         ibgda_device_state_h->num_exclusive_dcis / (num_dct_handles / n_devs_selected), 1);
     ibgda_device_state_h->num_rc_per_pe = num_rc_handles / n_devs_selected / n_pes;
+    ibgda_device_state_h->num_backup_rc_per_pe = num_backup_rc_handles / n_devs_selected / n_pes;
     ibgda_device_state_h->rc_map_type = rc_map_type;
     ibgda_device_state_h->num_requests_in_batch = ibgda_num_requests_in_batch;
     ibgda_device_state_h->support_half_av_seg = support_half_av_seg;
@@ -3741,6 +3745,189 @@ static void ibgda_get_device_dct(nvshmemi_ibgda_device_dct_t *dev_dct,
         htobe32(((device->support_half_av_seg ? 0ULL : 1ULL) << 31) | dev_dct->dqp_dct);
 }
 
+static int ibgda_populate_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
+                                      nvshmemi_ibgda_device_qp_t *backup_rc_h,
+                                      nvshmemi_ibgda_device_qp_t *backup_rc_d,
+                                      nvshmemi_ibgda_device_cq_t *cq_h,
+                                      nvshmemi_ibgda_device_cq_t *cq_d, int num_backup_rc_handles) {
+    int status = 0;
+    int n_pes = t->n_pes;
+    int mype = t->my_pe;
+    int n_devs_selected = ibgda_state->n_devs_selected;
+    int num_backup_rc_handles_populated = 0;
+    const size_t mvars_offset = offsetof(nvshmemi_ibgda_device_qp_t, mvars);
+    const size_t prod_idx_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.prod_idx);
+    const size_t cons_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.cons_idx);
+    const size_t wqe_h_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.resv_head);
+    const size_t wqe_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.ready_head);
+    const size_t rx_resv_head_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.resv_head);
+    const size_t rx_cons_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.cons_idx);
+
+    /* Get and store backup RC information start */
+    if (num_backup_rc_handles > 0) {
+        for (int i = 0; i < n_devs_selected; i++) {
+            int dev_idx = ibgda_state->selected_dev_ids[i];
+            struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+            
+            // 检查是否有备份 RC
+            if (device->rc.backup_dev_id == -1) {
+                TRACE(ibgda_state->log_level, "Device %d has no backup RC, skipping", dev_idx);
+                continue;
+            }
+            
+            // 备份 RC 的 CQ 索引需要考虑主 RC 已占用的 CQ
+            int first_cq_index = device->dci.num_eps + device->rc.num_eps_per_pe * n_pes * 2;
+            
+            for (int j = 0; j < device->rc.num_eps_per_pe * n_pes; j++) {
+                num_backup_rc_handles_populated++;
+                if (j % n_pes == mype) {
+                    continue;
+                }
+                
+                int ep_index = device->rc.num_eps_per_pe * i + j;
+                ibgda_ep *ep = device->rc.backup_eps[ep_index];
+                
+                if (!ep) {
+                    TRACE(ibgda_state->log_level, "Backup RC ep_index #%d is NULL, skipping", ep_index);
+                    continue;
+                }
+                
+                int qp_index = ep->user_index;
+                int my_cq_index = first_cq_index + qp_index * 2;  // 每个 RC 需要 2 个 CQ
+
+                TRACE(ibgda_state->log_level,
+                      "Populating backup RC at ep_index #%d, qp_idx #%d, cq_idx #%d ptr: %p", 
+                      ep_index, qp_index, my_cq_index, &backup_rc_h[qp_index]);
+
+                uintptr_t base_mvars_d_addr = (uintptr_t)(&backup_rc_d[qp_index]) + mvars_offset;
+                assert(qp_index < num_backup_rc_handles);
+
+                struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices + 
+                                                     device->rc.backup_dev_id;
+
+                TRACE(ibgda_state->log_level,
+                      "Populating backup RC at ep_index #%d, qp_idx #%d, qpn: %u, backup_dev: %d",
+                      ep_index, qp_index, ep->qpn, device->rc.backup_dev_id);
+                
+                ibgda_get_device_qp(ibgda_state, &backup_rc_h[qp_index], backup_device, ep, ep_index, i);
+                backup_rc_h[qp_index].tx_wq.cq = &cq_d[my_cq_index];
+                ibgda_get_device_cq(&cq_h[my_cq_index], ep->send_cq);
+                cq_h[my_cq_index].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
+                cq_h[my_cq_index].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
+                cq_h[my_cq_index].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
+                cq_h[my_cq_index].qpn = backup_rc_h[qp_index].qpn;
+                cq_h[my_cq_index].qp_type = backup_rc_h[qp_index].qp_type;
+
+                TRACE(ibgda_state->log_level, "Populating backup cq at cq_idx #%d qpn: %u qp_type: %u",
+                      my_cq_index, cq_h[my_cq_index].qpn, cq_h[my_cq_index].qp_type);
+                backup_rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                cq_h[my_cq_index].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+
+                my_cq_index++;
+                backup_rc_h[qp_index].rx_wq.cq = &cq_d[my_cq_index];
+                ibgda_get_device_cq(&cq_h[my_cq_index], ep->recv_cq);
+                cq_h[my_cq_index].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
+                cq_h[my_cq_index].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
+                cq_h[my_cq_index].qpn = backup_rc_h[qp_index].qpn;
+                cq_h[my_cq_index].qp_type = backup_rc_h[qp_index].qp_type;
+            }
+        }
+    }
+    /* Get and store backup RC information end */
+
+    INFO(ibgda_state->log_level, "Populated %d backup RC handles", num_backup_rc_handles_populated);
+
+    return status;
+}
+
+static int ibgda_copy_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state,
+                                  nvshmemi_ibgda_device_qp_t *backup_rc_h,
+                                  nvshmemi_ibgda_device_qp_t *backup_rc_d, 
+                                  int num_backup_rc_handles) {
+    int status = 0;
+
+    /* Copy host side structs to device side structs start */
+    if (num_backup_rc_handles > 0) {
+        status = cudaMemcpyAsync(backup_rc_d, (const void *)backup_rc_h,
+                                 sizeof(*backup_rc_h) * num_backup_rc_handles, 
+                                 cudaMemcpyHostToDevice,
+                                 ibgda_state->my_stream);
+        NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, 
+                              "backup rc copy err.");
+        
+        INFO(ibgda_state->log_level, "Copied %d backup RC handles to GPU", num_backup_rc_handles);
+    }
+    /* Copy host side structs to device side structs end */
+
+out:
+    return status;
+}
+
+static int ibgda_setup_backup_rc_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
+                                    int *num_backup_rc_handles, 
+                                    nvshmemi_ibgda_device_qp_t **backup_rc_h,
+                                    nvshmemi_ibgda_device_qp_t **backup_rc_d) {
+    int status = 0;
+    int n_pes = t->n_pes;
+    int n_devs_selected = ibgda_state->n_devs_selected;
+
+    /* Calculate backup RC buffer sizes start */
+    *num_backup_rc_handles = 0;
+    for (int j = 0; j < n_devs_selected; j++) {
+        int dev_idx = ibgda_state->selected_dev_ids[j];
+        struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+        
+        if (device->rc.backup_dev_id != -1 && device->rc.backup_eps != NULL) {
+            *num_backup_rc_handles += device->rc.num_eps_per_pe * n_pes;
+        }
+    }
+    INFO(ibgda_state->log_level, "num_backup_rc_handles: %d", *num_backup_rc_handles);
+    /* Calculate backup RC buffer sizes end */
+
+    /* Allocate backup RC host memory start */
+    if (*num_backup_rc_handles > 0) {
+        if (*backup_rc_h == NULL) {
+            TRACE(ibgda_state->log_level, "Allocating backup RC host memory");
+            *backup_rc_h = (nvshmemi_ibgda_device_qp_t *)calloc(*num_backup_rc_handles, 
+                                                                sizeof(**backup_rc_h));
+        } else {
+            TRACE(ibgda_state->log_level, "Reallocating backup RC host memory");
+            *backup_rc_h = (nvshmemi_ibgda_device_qp_t *)realloc(*backup_rc_h, 
+                                                                 *num_backup_rc_handles * sizeof(**backup_rc_h));
+        }
+        NVSHMEMI_NULL_ERROR_JMP(*backup_rc_h, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out, 
+                                "backup rc calloc err.");
+        
+        for (int i = 0; i < *num_backup_rc_handles; i++) {
+            TRACE(ibgda_state->log_level, "Initializing backup RC at index #%d", i);
+            nvshmemi_init_ibgda_device_qp((*backup_rc_h)[i]);
+        }
+    }
+    /* Allocate backup RC host memory end */
+
+    /* Allocate backup RC device memory start */
+    if (*num_backup_rc_handles > 0) {
+        if (*backup_rc_d != NULL) {
+            TRACE(ibgda_state->log_level, "Reallocating backup RC device memory");
+            nvshmemi_ibgda_device_qp_t *backup_rc_d_temp = NULL;
+            status = cudaMalloc(&backup_rc_d_temp, *num_backup_rc_handles * sizeof(**backup_rc_d));
+            NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                                  "backup_rc_d cudaM err.");
+            cudaFree(*backup_rc_d);
+            *backup_rc_d = backup_rc_d_temp;
+        } else {
+            TRACE(ibgda_state->log_level, "Allocating backup RC device memory");
+            status = cudaMalloc(backup_rc_d, *num_backup_rc_handles * sizeof(**backup_rc_d));
+        }
+        NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                              "backup_rc_d cudaM err.\n");
+    }
+    /* Allocate backup RC device memory end */
+    
+out:
+    return status;
+}
+
 static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     nvshmemt_ibgda_state_t *ibgda_state;
     ibgda_state = (nvshmemt_ibgda_state_t *)t->state;
@@ -3770,12 +3957,15 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     int num_dct_handles = 0;
     int num_dct_non_cache_handles = 0;
     int num_rc_handles = 0;
+    int num_backup_rc_handles = 0;
     int num_cq_handles = 0;
     int num_dci_handles = 0;
     int num_shared_dci_handles = 0;
     int status = 0;
     bool skip_cst = true;
     bool support_half_av_seg = true;
+
+    nvshmemi_ibgda_device_qp_t *backup_rc_d = NULL;
 
     assert(ibgda_device_state_h != 0);
 
@@ -3813,6 +4003,12 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
                                       &ibgda_state->device_state_cache->rc_h, &rc_d);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_setup_rc_gpu_state failed.");
     /* Setup RC GPU state end */
+
+    /* Setup backup RC GPU state start */
+    status = ibgda_setup_backup_rc_gpu_state(ibgda_state, t, &num_backup_rc_handles,
+                                      &ibgda_state->device_state_cache->backup_rc_h, &backup_rc_d);
+    NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_setup_backup_rc_gpu_state failed.");
+    /* Setup backup RC GPU state end */
 
     /* Setup CQ GPU state start */
     status = ibgda_setup_cq_gpu_state(ibgda_state, t, num_dci_handles, &num_cq_handles,
@@ -3874,9 +4070,21 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
     TRACE(ibgda_state->log_level, "Populated RC GPU data");
 
+    /* Populate backup RC GPU data start */
+    if (num_backup_rc_handles > 0) {
+        status = ibgda_populate_backup_rc_gpu_data(ibgda_state, t, 
+                                           ibgda_state->device_state_cache->backup_rc_h, backup_rc_d,
+                                           ibgda_state->device_state_cache->cq_h, cq_d, 
+                                           num_backup_rc_handles);
+        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                              "ibgda_populate_backup_rc_gpu_data failed.");
+        TRACE(ibgda_state->log_level, "Populated backup RC GPU data");
+    }
+    /* Populate backup RC GPU data end */
+
     TRACE(ibgda_state->log_level,
-          "num_dci_handles: %d, num_dct_handles: %d, num_cq_handles: %d, num_rc_handles: %d",
-          num_dci_handles, num_dct_handles, num_cq_handles, num_rc_handles);
+          "num_dci_handles: %d, num_dct_handles: %d, num_cq_handles: %d, num_rc_handles: %d, num_backup_rc_handles: %d",
+          num_dci_handles, num_dct_handles, num_cq_handles, num_rc_handles, num_backup_rc_handles);
 
     status = ibgda_copy_dct_gpu_data(ibgda_state, dct_h, dct_d, num_dct_handles,
                                      num_dct_non_cache_handles, ibgda_device_state_h);
@@ -3892,6 +4100,13 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_rc_gpu_data failed.");
     TRACE(ibgda_state->log_level, "Copied RC GPU data");
 
+    if (num_backup_rc_handles > 0) {
+        status = ibgda_copy_backup_rc_gpu_data(ibgda_state, ibgda_state->device_state_cache->backup_rc_h,
+                                        backup_rc_d, num_backup_rc_handles);
+        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_backup_rc_gpu_data failed.");
+        TRACE(ibgda_state->log_level, "Copied backup RC GPU data");
+    }
+
     status = ibgda_copy_cq_gpu_data(ibgda_state, ibgda_state->device_state_cache->cq_h, cq_d,
                                     num_cq_handles);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_cq_gpu_data failed.");
@@ -3900,8 +4115,8 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
     /* Post device state start */
     status = ibgda_post_gpu_device_state(
-        ibgda_state, t, ibgda_device_state_h, dci_d, rc_d, dct_d, cq_d, qp_group_switches_d,
-        num_qp_groups, num_shared_dci_handles, num_dci_handles, num_dct_handles, num_rc_handles,
+        ibgda_state, t, ibgda_device_state_h, dci_d, rc_d, dct_d, cq_d, backup_rc_d, qp_group_switches_d,
+        num_qp_groups, num_shared_dci_handles, num_dci_handles, num_dct_handles, num_rc_handles, num_backup_rc_handles,
         n_devs_selected, dc_map_type, rc_map_type, support_half_av_seg, skip_cst);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                           "ibgda_post_gpu_device_state failed.");
@@ -3913,10 +4128,12 @@ out:
         if (dct_h) free(dct_h);
         if (ibgda_state->device_state_cache->cq_h) free(ibgda_state->device_state_cache->cq_h);
         if (ibgda_state->device_state_cache->rc_h) free(ibgda_state->device_state_cache->rc_h);
+        if (ibgda_state->device_state_cache->backup_rc_h) free(ibgda_state->device_state_cache->backup_rc_h);
         if (dci_d) cudaFree(dci_d);
         if (dct_d) cudaFree(dct_d);
         if (cq_d) cudaFree(cq_d);
         if (rc_d) cudaFree(rc_d);
+        if (backup_rc_d) cudaFree(backup_rc_d);
         if (qp_group_switches_d) cudaFree(qp_group_switches_d);
     }
     return status;
@@ -4267,6 +4484,7 @@ int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
         if (ibgda_device_state_h->globalmem.dcis) cudaFree(ibgda_device_state_h->globalmem.dcis);
         if (ibgda_device_state_h->globalmem.cqs) cudaFree(ibgda_device_state_h->globalmem.cqs);
         if (ibgda_device_state_h->globalmem.rcs) cudaFree(ibgda_device_state_h->globalmem.rcs);
+        if (ibgda_device_state_h->globalmem.backup_rcs) cudaFree(ibgda_device_state_h->globalmem.backup_rcs);
         if (ibgda_device_state_h->globalmem.qp_group_switches)
             cudaFree(ibgda_device_state_h->globalmem.qp_group_switches);
     }
