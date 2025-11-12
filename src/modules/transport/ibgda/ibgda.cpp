@@ -3118,8 +3118,33 @@ out:
 static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device,
                                         int num_rc_eps) {
     /*
+    allocate backup RC device structs start
     */
-   ;
+    int status = 0;
+    if (device->backup_peer_ep_handles == NULL) {
+        device->rc.backup_peer_ep_handles =
+            (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*device->rc.backup_peer_ep_handles));
+    } else {
+        size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+        device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(
+        device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
+    }
+    NVSHMEMI_NULL_ERROR_JMP(device->rc.backup_peer_ep_handles, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                           "allocation of rc.backup_peer_ep_handles failed.");
+
+   if (device->rc.backup_eps == NULL) {
+       device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
+   } else {
+       size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+       device->rc.backup_eps =
+           (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
+   }
+   NVSHMEMI_NULL_ERROR_JMP(device->rc.backup_eps, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                           "allocation of rc.backup_eps failed.");
+   /* allocate backup RC device structs end */
+
+out:
+    return status;
 }
 
 static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
@@ -3212,12 +3237,89 @@ out:
 static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
                                     struct ibgda_device *device, struct ibgda_device *backup_device,
                                     int backup_portid, nvshmem_transport_t t, int num_eps_per_pe) {
-    /* TODO:
-    // 1. 使用 backup_device 和 backup_portid
-    // 2. 将结果存储在 device->rc.backup_eps 和 device->rc.backup_peer_ep_handles
-    // 3. 通过独立的 alltoall 交换备份句柄
-    */
-   ;
+    int status = 0;
+    int n_pes = t->n_pes;
+    int mype = t->my_pe;
+    int num_rc_eps = num_eps_per_pe * n_pes;
+    struct ibgda_rc_handle *local_backup_rc_handles = NULL;
+    int rc_first_index = device->rc.num_eps_per_pe * n_pes;
+    
+    if (num_rc_eps <= 0) return NVSHMEMX_SUCCESS;
+    /* allocate local backup RC handles start */
+    local_backup_rc_handles = (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*local_backup_rc_handles));
+    NVSHMEMI_NULL_ERROR_JMP(local_backup_rc_handles, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                            "allocation of local_backup_rc_handles failed.\n");
+
+    /* create and assign backup RCs start */
+    for (int i = 0; i < num_eps_per_pe; i++) {
+        for (int j = 0; j < n_pes; j++) {
+            int dst_pe = (i * n_pes + 1 + mype + j) % n_pes;
+            if (dst_pe == mype) continue;
+            
+            int mapped_i = rc_first_index + i * n_pes + dst_pe;
+            int local_mapped_i = i + num_eps_per_pe * dst_pe;
+
+            TRACE(ibgda_state->log_level, "Creating backup RC: dst_pe=%d, mapped_i=%d, local_mapped_i=%d", 
+                  dst_pe, mapped_i, local_mapped_i);
+            
+            status = ibgda_create_qp(ibgda_state, &device->rc.backup_eps[mapped_i], backup_device, 
+                                     backup_portid, mapped_i, NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC);
+            NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                  "ibgda_create_qp failed on backup RC #%d.", mapped_i);
+
+            status = ibgda_get_rc_handle(&local_backup_rc_handles[local_mapped_i],
+                                         device->rc.backup_eps[mapped_i], backup_device);
+            NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                  "ibgda_get_rc_handle failed on backup RC #%d.", mapped_i);
+        }
+    }
+    /* exchange backup RC handles start */
+    status = t->boot_handle->alltoall((void *)local_backup_rc_handles,
+                                      (void *)(device->rc.backup_peer_ep_handles + rc_first_index),
+                                      sizeof(*local_backup_rc_handles) * num_eps_per_pe, 
+                                      t->boot_handle);
+    NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                          "backup RC alltoall failed.\n");
+    /* exchange backup RC handles end */
+
+    /* QP state transitions start */
+    for (int i = 0; i < num_eps_per_pe; i++) {
+        for (int j = 0; j < n_pes; j++) {
+            if (j == mype) continue;
+            
+            int ep_index = rc_first_index + i * n_pes + j;
+            int peer_handle_index = rc_first_index + num_eps_per_pe * j + i;
+
+            TRACE(ibgda_state->log_level, 
+                  "Backup RC state transition: ep_index=%d, peer_handle_index=%d, dst_pe=%d",
+                  ep_index, peer_handle_index, j);
+
+            // RST → INIT
+            status = ibgda_qp_rst2init(device->rc.backup_eps[ep_index], backup_device, backup_portid);
+            NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                  "backup RC rst2init failed on ep #%d.", ep_index);
+
+            // INIT → RTR (使用远端备份句柄)
+            status = ibgda_rc_init2rtr(ibgda_state, device->rc.backup_eps[ep_index], backup_device, 
+                                       backup_portid, &device->rc.backup_peer_ep_handles[peer_handle_index]);
+            NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                  "backup RC init2rtr failed on ep #%d.", ep_index);
+
+            // RTR → RTS
+            status = ibgda_qp_rtr2rts(device->rc.backup_eps[ep_index], backup_device, backup_portid);
+            NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                  "backup RC rtr2rts failed on ep #%d.", ep_index);
+        }
+    }
+    /* QP state transitions end */
+
+    INFO(ibgda_state->log_level, "Backup RC endpoints setup completed successfully");
+
+out:
+    if (local_backup_rc_handles) {
+        free(local_backup_rc_handles);
+    }
+    return status;
 }
 
 static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
@@ -3933,6 +4035,8 @@ static int ibgda_connect_device_resources(nvshmemt_ibgda_state_t *ibgda_state,
         // Set backup device and port information in the RC structure
         device->rc.backup_dev_id = ibgda_state->backup_dev_ids[backup_mapping_idx];
         device->rc.backup_port_id = ibgda_state->backup_port_ids[backup_mapping_idx];
+        status = ibgda_allocate_backup_rc_structures(t, device, num_rc_eps_per_pe * n_pes);
+        if (status) return status;
         INFO(ibgda_state->log_level,
              "Device dev_idx=%d port=%d has backup: dev_id=%d port=%d",
              dev_idx, portid, device->rc.backup_dev_id, device->rc.backup_port_id);
@@ -3966,7 +4070,8 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
         struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices +
                                                 device->rc.backup_dev_id;
         status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device,
-                                                    device->rc.backup_port_id, t);
+                                                 device->rc.backup_port_id, t,
+                                                 ibgda_state->options->IBGDA_NUM_RC_PER_PE);
         if (status) return status;
     }
 
