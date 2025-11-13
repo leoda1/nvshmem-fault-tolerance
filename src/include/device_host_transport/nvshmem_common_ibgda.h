@@ -10,7 +10,7 @@
 #define NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING 24
 #define NVSHMEMI_IBGDA_STATE_PADDING 64
 
-#define NVSHMEMI_IBGDA_STATE_PADDING_V2 56
+#define NVSHMEMI_IBGDA_STATE_PADDING_V2 40
 
 #define NVSHMEMI_IBGDA_SCALAR_INVALID -1
 #define NVSHMEMI_IBGDA_USSCALAR_INVALID 0xFFFF
@@ -308,6 +308,7 @@ typedef struct {
     uint32_t num_qp_groups;
     uint32_t num_dct_groups;
     uint32_t num_rc_per_pe;
+    uint32_t num_backup_rc_per_pe;
     nvshmemi_ibgda_device_qp_map_type_t rc_map_type;
     uint32_t num_requests_in_batch; /* always a power of 2 */
     size_t log2_cumem_granularity;
@@ -332,6 +333,7 @@ typedef struct {
         nvshmemi_ibgda_device_cq_t *cqs;  // For both dcis and rcs. CQs for DCIs come first.
         nvshmemi_ibgda_device_qp_t *dcis;
         nvshmemi_ibgda_device_qp_t *rcs;
+        nvshmemi_ibgda_device_qp_t *backup_rcs;  // Backup RC QPs for fault tolerance
         nvshmemi_ibgda_device_local_only_mhandle *local_only_mhandle_head;
 
         // For dcts that cannot be contained in constmem.lkeys.
