@@ -210,6 +210,7 @@ struct ibgda_ep {
     struct ibgda_mem_object *uar_mobject;
 
     struct ibgda_cq *send_cq;
+    struct ibgda_cq *recv_cq;
     struct ibv_ah *ah;
 
     uint32_t user_index;
@@ -608,6 +609,7 @@ out:
     return NVSHMEMX_SUCCESS;
 }
 
+#ifdef NVSHMEM_USE_GDRCOPY
 int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
     int status = 0;
     status = ibgda_dci_progress(t);
@@ -615,6 +617,11 @@ int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
     status = ibgda_rc_progress(t);
     return status;
 }
+#else
+int nvshmemt_ibgda_progress(nvshmem_transport_t t) {
+    return NVSHMEMX_ERROR_NOT_SUPPORTED;
+}
+#endif
 
 /* =============================================================================
  * Memory handle management start
@@ -2138,8 +2145,11 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep 
     int cqe_version = 0;
 
     struct ibgda_cq *send_cq = NULL;
+    struct ibgda_cq *recv_cq = NULL;
 
     size_t num_wqebb = IBGDA_ROUND_UP_POW2_OR_0(ibgda_qp_depth);
+    size_t num_recv_wqe = ibgda_qp_depth;
+    size_t recv_wqe_size = 16;
 
     int status = 0;
 
@@ -2166,6 +2176,11 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep 
     // Create send_cq on GPU memory.
     status = ibgda_create_cq(ibgda_state, &send_cq, device);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_create_cq failed.\n");
+
+    if (qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
+        status = ibgda_create_cq(ibgda_state, &recv_cq, device);
+        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_create_cq failed.\n");
+    }
 
     // Allocate and map UAR. This will be used as a DB/BF register.
     status = ibgda_alloc_and_map_qp_uar(context, ibgda_nic_handler, &uar_mobject,
@@ -2215,12 +2230,9 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep 
     DEVX_SET(qpc, qp_context, pm_state, MLX5_QPC_PM_STATE_MIGRATED);
     DEVX_SET(qpc, qp_context, pd, device->qp_shared_object.pdn);
     DEVX_SET(qpc, qp_context, uar_page, uar_mobject->uar->page_id);  // BF register
-    DEVX_SET(qpc, qp_context, rq_type, IBGDA_SRQ_TYPE_VALUE);        // Shared Receive Queue
-    DEVX_SET(qpc, qp_context, srqn_rmpn_xrqn, device->qp_shared_object.srqn);
     DEVX_SET(qpc, qp_context, cqn_snd, send_cq->cqn);
-    DEVX_SET(qpc, qp_context, cqn_rcv, device->qp_shared_object.rcqn);
+    DEVX_SET(qpc, qp_context, cqn_rcv, qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC ? recv_cq->cqn : device->qp_shared_object.rcqn);
     DEVX_SET(qpc, qp_context, log_sq_size, IBGDA_ILOG2_OR0(num_wqebb));
-    DEVX_SET(qpc, qp_context, log_rq_size, 0);
     DEVX_SET(qpc, qp_context, cs_req, 0);                                     // Disable CS Request
     DEVX_SET(qpc, qp_context, cs_res, 0);                                     // Disable CS Response
     DEVX_SET(qpc, qp_context, dbr_umem_valid, IBGDA_MLX5_UMEM_VALID_ENABLE);  // Enable dbr_umem_id
@@ -2231,6 +2243,15 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep 
     DEVX_SET(qpc, qp_context, dbr_umem_id, ep->qp_ctrl.dbr_mobject->umem->umem_id);  // DBR buffer
     DEVX_SET(qpc, qp_context, user_index, qp_idx);
     DEVX_SET(qpc, qp_context, page_offset, 0);
+    if (qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC){
+        DEVX_SET(qpc, qp_context, rq_type, 0);        // Regular recv queue
+        DEVX_SET(qpc, qp_context, log_rq_size, IBGDA_ILOG2(num_recv_wqe)); // 4 wqe
+        DEVX_SET(qpc, qp_context, log_rq_stride, IBGDA_ILOG2(recv_wqe_size) - 4); // max recv wqe size = 16B
+    } else {
+        DEVX_SET(qpc, qp_context, rq_type, IBGDA_SRQ_TYPE_VALUE);        // Shared Receive Queue, DC must use this.
+        DEVX_SET(qpc, qp_context, srqn_rmpn_xrqn, device->qp_shared_object.srqn);
+        DEVX_SET(qpc, qp_context, log_rq_size, 0);
+    }
 
     ep->devx_qp = mlx5dv_devx_obj_create(context, cmd_in, sizeof(cmd_in), cmd_out, sizeof(cmd_out));
     NVSHMEMI_NULL_ERROR_JMP(ep->devx_qp, status, NVSHMEMX_ERROR_INTERNAL, out,
@@ -2240,14 +2261,15 @@ static int ibgda_create_qp(nvshmemt_ibgda_state_t *ibgda_state, struct ibgda_ep 
     ep->portid = portid;
 
     ep->sq_cnt = num_wqebb;
-    ep->sq_buf_offset = 0;
+    ep->sq_buf_offset = num_recv_wqe * recv_wqe_size;
 
-    ep->rq_cnt = 0;
+    ep->rq_cnt = num_recv_wqe;
     ep->rq_buf_offset = 0;
 
     ep->uar_mobject = uar_mobject;
 
     ep->send_cq = send_cq;
+    ep->recv_cq = recv_cq;
 
     ep->qp_type = qp_type;
 
@@ -2259,6 +2281,7 @@ out:
     if (status) {
         if (uar_mobject) ibgda_unmap_and_free_qp_uar(uar_mobject);
         if (send_cq) ibgda_destroy_cq(send_cq);
+        if (recv_cq) ibgda_destroy_cq(recv_cq);
         if (ep) free(ep);
     }
 
@@ -3183,6 +3206,8 @@ static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshm
     const size_t cons_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.cons_idx);
     const size_t wqe_h_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.resv_head);
     const size_t wqe_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.ready_head);
+    const size_t rx_resv_head_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.resv_head);
+    const size_t rx_cons_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.cons_idx);
 
     /* Get and store RC information start */
     if (num_rc_handles > 0) {
@@ -3224,6 +3249,15 @@ static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshm
                       my_cq_index, cq_h[my_cq_index].qpn, cq_h[my_cq_index].qp_type);
                 rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
                 cq_h[my_cq_index].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+
+                // Setup recv CQ for RC
+                my_cq_index++;
+                rc_h[qp_index].rx_wq.cq = &cq_d[my_cq_index];
+                ibgda_get_device_cq(&cq_h[my_cq_index], ep->recv_cq);
+                cq_h[my_cq_index].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
+                cq_h[my_cq_index].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
+                cq_h[my_cq_index].qpn = rc_h[qp_index].qpn;
+                cq_h[my_cq_index].qp_type = rc_h[qp_index].qp_type;
             }
         }
     }
@@ -3331,7 +3365,8 @@ static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
     for (int j = 0; j < n_devs_selected; j++) {
         int dev_idx = ibgda_state->selected_dev_ids[j];
         struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
-        *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes);
+        // Each RC qp has one send CQ and one recv CQ.
+        *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes * 2);
     }
     /* Calculate CQ buffer sizes end */
 
@@ -3480,6 +3515,10 @@ static int ibgda_destroy_ep(struct ibgda_ep *ep) {
         ibgda_destroy_cq(ep->send_cq);
     }
 
+    if (ep->recv_cq) {
+        ibgda_destroy_cq(ep->recv_cq);
+    }
+
     if (ep->ah) {
         ftable.destroy_ah(ep->ah);
     }
@@ -3524,7 +3563,7 @@ static void ibgda_get_device_qp(nvshmemt_ibgda_state_t *ibgda_state,
     dev_qp->dev_idx = selected_dev_idx;
 
     dev_qp->tx_wq.wqe =
-        (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr + qp_ctrl->wq_offset);
+        (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr + qp_ctrl->wq_offset + ep->sq_buf_offset);
 
     if (ibgda_nic_handler == IBGDA_NIC_HANDLER_GPU) {
         assert(qp_ctrl->dbr_mobject->has_gpu_mapping);
@@ -3539,6 +3578,12 @@ static void ibgda_get_device_qp(nvshmemt_ibgda_state_t *ibgda_state,
     }
 
     dev_qp->tx_wq.nwqes = ep->sq_cnt;
+    if (ep->qp_type == NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC) {
+        dev_qp->rx_wq.nwqes = ep->rq_cnt;
+        dev_qp->rx_wq.wqe = (void *)((uintptr_t)qp_ctrl->wq_mobject->aligned.gpu_ptr + qp_ctrl->wq_offset + ep->rq_buf_offset);
+        dev_qp->rx_wq.dbrec = (__be32 *)((uintptr_t)qp_ctrl->dbr_mobject->aligned.gpu_ptr + qp_ctrl->dbr_offset);
+        dev_qp->rx_wq.bf = (void *)ep->uar_mobject->aligned.gpu_ptr;
+    }
 
     ibuf_dci_start = (uintptr_t)device->dci.dci_ctrl.internal_buf.mem_object->aligned.gpu_ptr;
 
