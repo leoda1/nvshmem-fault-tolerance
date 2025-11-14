@@ -2022,7 +2022,8 @@ static int ibgda_create_qp_shared_objects(nvshmemt_ibgda_state_t *ibgda_state,
     struct ibv_context *context = device->common_device.context;
     struct ibv_pd *pd = device->common_device.pd;
     size_t num_wqebb = IBGDA_ROUND_UP_POW2_OR_0(ibgda_qp_depth);
-    size_t wq_buf_size_per_qp = num_wqebb * MLX5_SEND_WQE_BB;  // num_wqebb is always a power of 2
+    // DeepEP said they will reduce the size of wq buffer. But not yet. Damn it.
+    size_t wq_buf_size_per_qp = num_wqebb * MLX5_SEND_WQE_BB * 2;  // num_wqebb is always a power of 2
 
     struct ibv_srq *srq = NULL;
     struct ibv_srq_init_attr srq_init_attr;
