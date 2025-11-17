@@ -10,7 +10,8 @@
 #define NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING 24
 #define NVSHMEMI_IBGDA_STATE_PADDING 64
 
-#define NVSHMEMI_IBGDA_STATE_PADDING_V2 40
+// need to consider the size of the new fields
+#define NVSHMEMI_IBGDA_STATE_PADDING_V2 0
 
 #define NVSHMEMI_IBGDA_SCALAR_INVALID -1
 #define NVSHMEMI_IBGDA_USSCALAR_INVALID 0xFFFF
@@ -102,10 +103,20 @@
         state.globalmem.cqs = NULL;                                        \
         state.globalmem.dcis = NULL;                                       \
         state.globalmem.rcs = NULL;                                        \
+        state.globalmem.backup_rcs = NULL;                                 \
+        state.globalmem.backup_cqs = NULL;                                 \
+        state.globalmem.rc_health_status = NULL;                           \
+        state.globalmem.rc_failure_count = NULL;                           \
+        state.globalmem.rc_last_check_time = NULL;                         \
+        state.globalmem.rc_switch_time = NULL;                             \
         state.globalmem.local_only_mhandle_head = NULL;                    \
         state.globalmem.dcts = NULL;                                       \
         state.globalmem.lkeys = NULL;                                      \
         state.globalmem.rkeys = NULL;                                      \
+        state.failure_threshold = 3;                                       \
+        state.recovery_interval_cycles = 0;                                \
+        state.check_interval = 16;                                         \
+        state.gpu_clock_freq_ghz = 1.5f;                                   \
         state.extra = NULL;                                                \
     } while (0);
 
@@ -132,6 +143,14 @@ typedef enum {
     NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC = 3,
     NVSHMEMI_IBGDA_DEVICE_QP_TYPE_MAX = INT_MAX,
 } nvshmemi_ibgda_device_qp_type_t;
+
+// QP 健康状态枚举，用于故障检测和切换
+typedef enum {
+    IBGDA_QP_HEALTH_GOOD = 0,        // QP 健康，使用主 QP
+    IBGDA_QP_HEALTH_SUSPECTED = 1,   // 检测到失败，但未达到阈值
+    IBGDA_QP_HEALTH_FAILED = 2,      // 已切换到备份 QP
+    IBGDA_QP_HEALTH_RECOVERING = 3   // 正在尝试切回主 QP
+} ibgda_qp_health_status_t;
 
 typedef enum {
     NVSHMEMI_IBGDA_DEVICE_QP_MAP_TYPE_CTA = 0,
@@ -334,7 +353,14 @@ typedef struct {
         nvshmemi_ibgda_device_qp_t *dcis;
         nvshmemi_ibgda_device_qp_t *rcs;
         nvshmemi_ibgda_device_qp_t *backup_rcs;  // Backup RC QPs for fault tolerance
+        nvshmemi_ibgda_device_cq_t *backup_cqs;  // Backup CQs for fault tolerance
         nvshmemi_ibgda_device_local_only_mhandle *local_only_mhandle_head;
+
+        // QP 健康管理数组（每个 RC QP 一个条目）
+        uint8_t *rc_health_status;       // ibgda_qp_health_status_t
+        uint32_t *rc_failure_count;      // 连续失败计数
+        uint64_t *rc_last_check_time;    // 上次检查时间（clock64 周期数）
+        uint64_t *rc_switch_time;        // 切换到备份 QP 的时间
 
         // For dcts that cannot be contained in constmem.lkeys.
         // dcts[idx - NVSHMEMI_IBGDA_MAX_CONST_DCTS] gives the dct of idx.
@@ -350,6 +376,13 @@ typedef struct {
         nvshmemi_ibgda_device_key_t *rkeys;
     } globalmem;
     int num_default_rc_per_pe;
+    
+    // 故障检测参数
+    uint32_t failure_threshold;          // 连续失败多少次触发切换（默认 3）
+    uint64_t recovery_interval_cycles;   // 恢复重试间隔（GPU 时钟周期，默认约 1 秒）
+    uint32_t check_interval;             // 每隔多少次操作检查一次 CQ（默认 16）
+    float gpu_clock_freq_ghz;            // GPU 时钟频率（GHz），用于时间转换
+    
     void *extra;
     uint8_t reserved[NVSHMEMI_IBGDA_STATE_PADDING_V2];
 } nvshmemi_ibgda_device_state_v2;
