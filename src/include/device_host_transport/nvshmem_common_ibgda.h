@@ -9,9 +9,7 @@
 
 #define NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING 24
 #define NVSHMEMI_IBGDA_STATE_PADDING 64
-
-// need to consider the size of the new fields
-#define NVSHMEMI_IBGDA_STATE_PADDING_V2 0
+#define NVSHMEMI_IBGDA_STATE_PADDING_V2 64
 
 #define NVSHMEMI_IBGDA_SCALAR_INVALID -1
 #define NVSHMEMI_IBGDA_USSCALAR_INVALID 0xFFFF
@@ -377,17 +375,16 @@ typedef struct {
     } globalmem;
     int num_default_rc_per_pe;
     
-    // 故障检测参数
-    uint32_t failure_threshold;          // 连续失败多少次触发切换（默认 3）
     uint64_t recovery_interval_cycles;   // 恢复重试间隔（GPU 时钟周期，默认约 1 秒）
+    uint32_t failure_threshold;          // 连续失败多少次触发切换（默认 3）
     uint32_t check_interval;             // 每隔多少次操作检查一次 CQ（默认 16）
     float gpu_clock_freq_ghz;            // GPU 时钟频率（GHz），用于时间转换
     
     void *extra;
     uint8_t reserved[NVSHMEMI_IBGDA_STATE_PADDING_V2];
 } nvshmemi_ibgda_device_state_v2;
-static_assert(sizeof(nvshmemi_ibgda_device_state_v2) == 8384,
-              "ibgda_device_state_v2 must be 8384 bytes.");
+static_assert(sizeof(nvshmemi_ibgda_device_state_v2) == 8472,
+              "ibgda_device_state_v2 must be 8472 bytes.");
 
 typedef nvshmemi_ibgda_device_state_v2 nvshmemi_ibgda_device_state_t;
 

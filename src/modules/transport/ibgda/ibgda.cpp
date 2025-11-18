@@ -3501,6 +3501,21 @@ out:
 }
 
 /* =============================================================================
+ * GPU STATE SETUP HELPER FUNCTIONS - Forward Declarations
+ * ============================================================================= */
+
+static int ibgda_init_health_management_arrays(nvshmemt_ibgda_state_t *ibgda_state,
+                                               nvshmem_transport_t t,
+                                               int num_rc_handles,
+                                               ibgda_qp_health_status_t **rc_health_status_d,
+                                               uint32_t **rc_failure_count_d,
+                                               uint64_t **rc_last_check_time_d,
+                                               uint64_t **rc_switch_time_d);
+
+static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state,
+                                             nvshmemi_ibgda_device_state_t *device_state_h);
+
+/* =============================================================================
  * GPU STATE SETUP HELPER FUNCTIONS
  * ============================================================================= */
 
@@ -3632,7 +3647,7 @@ static int ibgda_post_gpu_device_state(
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_init_health_management_arrays failed\n");
 
-        ibgda_device_state_h->globalmem.rc_health_status = rc_health_status_d;
+        ibgda_device_state_h->globalmem.rc_health_status = (uint8_t*)rc_health_status_d;
         ibgda_device_state_h->globalmem.rc_failure_count = rc_failure_count_d;
         ibgda_device_state_h->globalmem.rc_last_check_time = rc_last_check_time_d;
         ibgda_device_state_h->globalmem.rc_switch_time = rc_switch_time_d;
@@ -3674,7 +3689,6 @@ static int ibgda_post_gpu_device_state(
 
 out:
     if (status) {
-        // 清理健康管理数组
         if (rc_health_status_d) cudaFree(rc_health_status_d);
         if (rc_failure_count_d) cudaFree(rc_failure_count_d);
         if (rc_last_check_time_d) cudaFree(rc_last_check_time_d);
@@ -3964,7 +3978,7 @@ static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state
 
     // 计算恢复间隔（转换为 GPU 时钟周期）
     // recovery_interval_ms * gpu_clock_freq_ghz * 1e6 = cycles
-    float recovery_interval_ms = (float)options->IBGDA_RECOVERY_INTERVAL;
+    uint32_t recovery_interval_ms = options->IBGDA_RECOVERY_INTERVAL;
     device_state_h->recovery_interval_cycles = 
         (uint64_t)(recovery_interval_ms * gpu_clock_freq_ghz * 1e6f);
 
@@ -3975,7 +3989,7 @@ static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state
          "  check_interval = %u\n"
          "  gpu_clock_freq = %.2f GHz\n",
          device_state_h->failure_threshold,
-         options->IBGDA_RECOVERY_INTERVAL,
+         recovery_interval_ms,
          device_state_h->recovery_interval_cycles,
          device_state_h->check_interval,
          device_state_h->gpu_clock_freq_ghz);
@@ -4309,8 +4323,7 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
     status =
         ibgda_populate_rc_gpu_data(ibgda_state, t, ibgda_state->device_state_cache->rc_h, rc_d,
-                                   ibgda_state->device_state_cache->cq_h, cq_d, num_rc_handles,
-                                   &cq_cursor);
+                                   ibgda_state->device_state_cache->cq_h, cq_d, num_rc_handles);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                           "ibgda_populate_rc_gpu_data failed.");
 

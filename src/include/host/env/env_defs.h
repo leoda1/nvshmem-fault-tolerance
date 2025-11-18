@@ -358,9 +358,9 @@ NVSHMEMI_ENV_DEF(IBGDA_FAILURE_THRESHOLD, int, 3, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Number of consecutive CQ errors before switching to backup QP.\n"
                  "Default: 3. Higher values reduce false positives but increase detection latency.")
 
-NVSHMEMI_ENV_DEF(IBGDA_RECOVERY_INTERVAL, int, 1, NVSHMEMI_ENV_CAT_TRANSPORT,
-                 "Time interval (in seconds) between attempts to recover from backup to primary QP.\n"
-                 "Default: 1 second. Higher values reduce recovery overhead but延长 recovery time.")
+NVSHMEMI_ENV_DEF(IBGDA_RECOVERY_INTERVAL, int, 1000, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Time interval (in milliseconds) between attempts to recover from backup to primary QP.\n"
+                 "Default: 1000ms (1 second). Higher values reduce recovery overhead but prolong recovery time.")
 
 NVSHMEMI_ENV_DEF(IBGDA_CHECK_INTERVAL, int, 16, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Number of operations between periodic CQ health checks.\n"
