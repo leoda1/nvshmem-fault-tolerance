@@ -3358,64 +3358,74 @@ static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshm
                                       nvshmemi_ibgda_device_qp_t *rc_h,
                                       nvshmemi_ibgda_device_qp_t *rc_d,
                                       nvshmemi_ibgda_device_cq_t *cq_h,
-                                      nvshmemi_ibgda_device_cq_t *cq_d, int num_rc_handles) {
+                                      nvshmemi_ibgda_device_cq_t *cq_d, int num_rc_handles,
+                                      int *cq_index) {
     int status = 0;
     int n_pes = t->n_pes;
     int mype = t->my_pe;
     int n_devs_selected = ibgda_state->n_devs_selected;
     int num_rc_handles_populated = 0;
+    int cq_idx = cq_index ? *cq_index : 0;
     const size_t mvars_offset = offsetof(nvshmemi_ibgda_device_qp_t, mvars);
     const size_t prod_idx_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.prod_idx);
     const size_t cons_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.cons_idx);
     const size_t wqe_h_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.resv_head);
     const size_t wqe_t_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, tx_wq.ready_head);
+    const size_t rx_resv_head_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.resv_head);
+    const size_t rx_cons_offset = offsetof(nvshmemi_ibgda_device_qp_management_t, rx_wq.cons_idx);
 
     /* Get and store RC information start */
     if (num_rc_handles > 0) {
         for (int i = 0; i < n_devs_selected; i++) {
             int dev_idx = ibgda_state->selected_dev_ids[i];
             struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
-            int first_cq_index = device->dci.num_eps;
             for (int j = 0; j < device->rc.num_eps_per_pe * n_pes; j++) {
                 num_rc_handles_populated++;
                 if (j % n_pes == mype) {
+                    cq_idx += 2;
                     continue;
                 }
                 int ep_index = device->rc.num_eps_per_pe * i + j;
                 ibgda_ep *ep = device->rc.eps[ep_index];
                 int qp_index = ep->user_index;
-                int my_cq_index = first_cq_index + qp_index;
 
                 TRACE(ibgda_state->log_level,
                       "Populating RC at ep_index #%d, qp_idx #%d, cq_idx #%d ptr: %p", ep_index,
-                      qp_index, my_cq_index, &rc_h[qp_index]);
+                      qp_index, cq_idx, &rc_h[qp_index]);
 
                 uintptr_t base_mvars_d_addr = (uintptr_t)(&rc_d[qp_index]) + mvars_offset;
                 assert(qp_index < num_rc_handles);
 
                 ibgda_get_device_qp(ibgda_state, &rc_h[qp_index], device, ep, ep_index, i);
                 TRACE(ibgda_state->log_level,
-                    "Populating RC at ep_index #%d, qp_idx #%d, qpn: %u, qp_type: %u", ep_index,
-                    qp_index, rc_h[qp_index].qpn, rc_h[qp_index].qp_type);
+                      "Populating RC at ep_index #%d, qp_idx #%d, qpn: %u, qp_type: %u",
+                      ep_index, qp_index, rc_h[qp_index].qpn, rc_h[qp_index].qp_type);
 
-                rc_h[qp_index].tx_wq.cq = &cq_d[my_cq_index];
-                ibgda_get_device_cq(&cq_h[my_cq_index], ep->send_cq);
-                cq_h[my_cq_index].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
-                cq_h[my_cq_index].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
-                cq_h[my_cq_index].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
-                cq_h[my_cq_index].qpn = rc_h[qp_index].qpn;
-                cq_h[my_cq_index].qp_type = rc_h[qp_index].qp_type;
-
-                TRACE(ibgda_state->log_level, "Populating cq at cq_idx #%d qpn: %u qp_type: %u",
-                      my_cq_index, cq_h[my_cq_index].qpn, cq_h[my_cq_index].qp_type);
+                rc_h[qp_index].tx_wq.cq = &cq_d[cq_idx];
+                ibgda_get_device_cq(&cq_h[cq_idx], ep->send_cq);
+                cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
+                cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
+                cq_h[cq_idx].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
+                cq_h[cq_idx].qpn = rc_h[qp_index].qpn;
+                cq_h[cq_idx].qp_type = rc_h[qp_index].qp_type;
                 rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
-                cq_h[my_cq_index].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                cq_h[cq_idx].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                cq_idx++;
+
+                rc_h[qp_index].rx_wq.cq = &cq_d[cq_idx];
+                ibgda_get_device_cq(&cq_h[cq_idx], ep->recv_cq);
+                cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
+                cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
+                cq_h[cq_idx].qpn = rc_h[qp_index].qpn;
+                cq_h[cq_idx].qp_type = rc_h[qp_index].qp_type;
+                cq_idx++;
             }
         }
     }
     /* Get and store RC information end */
 
     assert(num_rc_handles_populated == num_rc_handles);
+    if (cq_index) *cq_index = cq_idx;
 
     return status;
 }
@@ -4323,7 +4333,8 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
     status =
         ibgda_populate_rc_gpu_data(ibgda_state, t, ibgda_state->device_state_cache->rc_h, rc_d,
-                                   ibgda_state->device_state_cache->cq_h, cq_d, num_rc_handles);
+                                   ibgda_state->device_state_cache->cq_h, cq_d, num_rc_handles,
+                                   &cq_cursor);
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                           "ibgda_populate_rc_gpu_data failed.");
 
@@ -4333,10 +4344,11 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     if (num_backup_rc_handles > 0) {
         status = ibgda_populate_backup_rc_gpu_data(ibgda_state, t, 
                                            ibgda_state->device_state_cache->backup_rc_h, backup_rc_d,
-                                           ibgda_state->device_state_cache->cq_h, cq_d, 
-                                           num_backup_rc_handles, &cq_cursor);
+                                           ibgda_state->device_state_cache->cq_h, cq_d, num_backup_rc_handles,
+                                           &cq_cursor);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_populate_backup_rc_gpu_data failed.");
+
         TRACE(ibgda_state->log_level, "Populated backup RC GPU data");
     }
     /* Populate backup RC GPU data end */
