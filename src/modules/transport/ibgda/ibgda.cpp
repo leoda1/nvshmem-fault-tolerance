@@ -3543,6 +3543,8 @@ static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
         int dev_idx = ibgda_state->selected_dev_ids[j];
         struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
         // Each RC qp has one send CQ and one recv CQ.
+        // The DeepEP's num_cq_handles here are as fllow:
+        // *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes * 2)
         *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes * 2) + (device->rc.num_backup_eps_per_pe * n_pes * 2);
     }
     /* Calculate CQ buffer sizes end */
@@ -4007,8 +4009,7 @@ static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state
     return 0;
 }
 
-static int ibgda_populate_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state,
-                                             nvshmem_transport_t t,
+static int ibgda_populate_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
                                              nvshmemi_ibgda_device_qp_t *backup_rc_h,
                                              nvshmemi_ibgda_device_qp_t *backup_rc_d,
                                              nvshmemi_ibgda_device_cq_t *cq_h,
@@ -4067,34 +4068,34 @@ static int ibgda_populate_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state
                     num_backup_rc_handles_populated++;
 
                     int qp_index = ep->user_index;
-                uintptr_t base_mvars_d_addr = (uintptr_t)(&backup_rc_d[qp_index]) + mvars_offset;
-                assert(qp_index < num_backup_rc_handles);
+                    uintptr_t base_mvars_d_addr = (uintptr_t)(&backup_rc_d[qp_index]) + mvars_offset;
+                    assert(qp_index < num_backup_rc_handles);
 
-                TRACE(ibgda_state->log_level,
-                      "Populating backup RC at ep_index #%d, qp_idx #%d, cq_idx #%d ptr: %p", 
-                      ep_index, qp_index, cq_idx, &backup_rc_h[qp_index]);
+                    TRACE(ibgda_state->log_level,
+                        "Populating backup RC at ep_index #%d, qp_idx #%d, cq_idx #%d ptr: %p", 
+                        ep_index, qp_index, cq_idx, &backup_rc_h[qp_index]);
 
-                ibgda_get_device_qp(ibgda_state, &backup_rc_h[qp_index], backup_device, ep, ep_index,
-                                     backup_selected_idx);
+                    ibgda_get_device_qp(ibgda_state, &backup_rc_h[qp_index], backup_device, ep, ep_index,
+                                        backup_selected_idx);
 
-                backup_rc_h[qp_index].tx_wq.cq = &cq_d[cq_idx];
-                ibgda_get_device_cq(&cq_h[cq_idx], ep->send_cq);
-                cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
-                cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
-                cq_h[cq_idx].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
-                cq_h[cq_idx].qpn = backup_rc_h[qp_index].qpn;
-                cq_h[cq_idx].qp_type = backup_rc_h[qp_index].qp_type;
-                backup_rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
-                cq_h[cq_idx].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
-                cq_idx++;
+                    backup_rc_h[qp_index].tx_wq.cq = &cq_d[cq_idx];
+                    ibgda_get_device_cq(&cq_h[cq_idx], ep->send_cq);
+                    cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
+                    cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
+                    cq_h[cq_idx].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
+                    cq_h[cq_idx].qpn = backup_rc_h[qp_index].qpn;
+                    cq_h[cq_idx].qp_type = backup_rc_h[qp_index].qp_type;
+                    backup_rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                    cq_h[cq_idx].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+                    cq_idx++;
 
-                backup_rc_h[qp_index].rx_wq.cq = &cq_d[cq_idx];
-                ibgda_get_device_cq(&cq_h[cq_idx], ep->recv_cq);
-                cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
-                cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
-                cq_h[cq_idx].qpn = backup_rc_h[qp_index].qpn;
-                cq_h[cq_idx].qp_type = backup_rc_h[qp_index].qp_type;
-                cq_idx++;
+                    backup_rc_h[qp_index].rx_wq.cq = &cq_d[cq_idx];
+                    ibgda_get_device_cq(&cq_h[cq_idx], ep->recv_cq);
+                    cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
+                    cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
+                    cq_h[cq_idx].qpn = backup_rc_h[qp_index].qpn;
+                    cq_h[cq_idx].qp_type = backup_rc_h[qp_index].qp_type;
+                    cq_idx++;
                 }
             }
         }
@@ -4111,7 +4112,6 @@ static int ibgda_copy_backup_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state,
                                   nvshmemi_ibgda_device_qp_t *backup_rc_d, 
                                   int num_backup_rc_handles) {
     int status = 0;
-
     /* Copy host side structs to device side structs start */
     if (num_backup_rc_handles > 0) {
         status = cudaMemcpyAsync(backup_rc_d, (const void *)backup_rc_h,
@@ -4340,19 +4340,14 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
     TRACE(ibgda_state->log_level, "Populated RC GPU data");
 
-    /* Populate backup RC GPU data start */
-    if (num_backup_rc_handles > 0) {
-        status = ibgda_populate_backup_rc_gpu_data(ibgda_state, t, 
-                                           ibgda_state->device_state_cache->backup_rc_h, backup_rc_d,
-                                           ibgda_state->device_state_cache->cq_h, cq_d, num_backup_rc_handles,
-                                           &cq_cursor);
-        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                              "ibgda_populate_backup_rc_gpu_data failed.");
+    status = 
+        ibgda_populate_backup_rc_gpu_data(ibgda_state, t, ibgda_state->device_state_cache->backup_rc_h, backup_rc_d,
+                                          ibgda_state->device_state_cache->cq_h, cq_d, num_backup_rc_handles,
+                                          &cq_cursor);
+    NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                            "ibgda_populate_backup_rc_gpu_data failed.");
 
-        TRACE(ibgda_state->log_level, "Populated backup RC GPU data");
-    }
-    /* Populate backup RC GPU data end */
-
+    TRACE(ibgda_state->log_level, "Populated backup RC GPU data");
     assert(cq_cursor == num_cq_handles);
 
     TRACE(ibgda_state->log_level,
@@ -4373,12 +4368,10 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_rc_gpu_data failed.");
     TRACE(ibgda_state->log_level, "Copied RC GPU data");
 
-    if (num_backup_rc_handles > 0) {
-        status = ibgda_copy_backup_rc_gpu_data(ibgda_state, ibgda_state->device_state_cache->backup_rc_h,
-                                        backup_rc_d, num_backup_rc_handles);
-        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_backup_rc_gpu_data failed.");
-        TRACE(ibgda_state->log_level, "Copied backup RC GPU data");
-    }
+    status = ibgda_copy_backup_rc_gpu_data(ibgda_state, ibgda_state->device_state_cache->backup_rc_h,
+                                    backup_rc_d, num_backup_rc_handles);
+    NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "ibgda_copy_backup_rc_gpu_data failed.");
+    TRACE(ibgda_state->log_level, "Copied backup RC GPU data");
 
     status = ibgda_copy_cq_gpu_data(ibgda_state, ibgda_state->device_state_cache->cq_h, cq_d,
                                     num_cq_handles);
