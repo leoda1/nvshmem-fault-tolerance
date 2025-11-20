@@ -210,6 +210,290 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_is_rc_enable
     return ibgda_get_state()->num_rc_per_pe > 0;
 }
 
+// ============================================================================
+// CQ 状态检测与故障切换相关函数
+// ============================================================================
+
+// MLX5 CQE 错误码定义
+#define MLX5_CQE_OWNER_MASK 0x01
+#define MLX5_CQE_SYNDROME_LOCAL_LENGTH_ERR          0x01
+#define MLX5_CQE_SYNDROME_LOCAL_QP_OP_ERR           0x02
+#define MLX5_CQE_SYNDROME_LOCAL_PROT_ERR            0x04
+#define MLX5_CQE_SYNDROME_WR_FLUSH_ERR              0x05
+#define MLX5_CQE_SYNDROME_MW_BIND_ERR               0x06
+#define MLX5_CQE_SYNDROME_BAD_RESP_ERR              0x10
+#define MLX5_CQE_SYNDROME_LOCAL_ACCESS_ERR          0x11
+#define MLX5_CQE_SYNDROME_REMOTE_INVAL_REQ_ERR      0x12
+#define MLX5_CQE_SYNDROME_REMOTE_ACCESS_ERR         0x13
+#define MLX5_CQE_SYNDROME_REMOTE_OP_ERR             0x14
+#define MLX5_CQE_SYNDROME_TRANSPORT_RETRY_EXC_ERR   0x15
+#define MLX5_CQE_SYNDROME_RNR_RETRY_EXC_ERR         0x16
+#define MLX5_CQE_SYNDROME_REMOTE_ABORTED_ERR        0x22
+
+/**
+ * 获取当前 GPU 时钟周期数
+ * 使用 clock64() 获取 64 位周期计数器
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE uint64_t ibgda_get_clock_cycles() {
+    return clock64();
+}
+
+/**
+ * 检查是否经过了指定的时间间隔
+ * @param last_time 上次记录的时间（周期数）
+ * @param interval_cycles 时间间隔（周期数）
+ * @return true 如果已经过了指定间隔
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_time_elapsed(
+    uint64_t last_time, uint64_t interval_cycles) {
+    uint64_t current = ibgda_get_clock_cycles();
+    // 处理溢出情况（虽然 uint64 溢出需要很长时间）
+    return (current - last_time) >= interval_cycles;
+}
+
+/**
+ * 检查 CQ 是否有错误（轻量级版本）
+ * 只检查最新的 CQE，不等待新的完成
+ * 
+ * @param cq 要检查的 CQ
+ * @return true 如果检测到错误，false 表示正常或无新完成
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_check_cq_error_lightweight(
+    nvshmemi_ibgda_device_cq_t *cq) {
+    
+    if (cq == nullptr || cq->cqe == nullptr) {
+        return false;  // 无效的 CQ，保守处理
+    }
+    
+    // 读取当前消费者索引
+    uint64_t cons_idx = 0;
+    if (cq->cons_idx != nullptr) {
+        cons_idx = *cq->cons_idx;
+    }
+    
+    // 计算 CQE 索引
+    uint32_t cqe_idx = cons_idx & (cq->ncqes - 1);
+    
+    // 获取 CQE 指针
+    struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)((uintptr_t)cq->cqe + cqe_idx * sizeof(*cqe));
+    
+    // 检查 ownership bit 确定这是新的 CQE
+    uint8_t op_own = cqe->op_own;
+    uint8_t owner = op_own & MLX5_CQE_OWNER_MASK;
+    uint8_t expected_owner = (cons_idx & cq->ncqes) ? MLX5_CQE_OWNER_MASK : 0;
+    
+    if (owner != expected_owner) {
+        // 没有新的完成，无法判断（保守返回 false）
+        return false;
+    }
+    
+    // 提取状态字段（syndrome）
+    uint8_t syndrome = (op_own >> 4) & 0xF;
+    
+    // syndrome == 0 表示成功
+    // 非零值表示各种错误
+    return (syndrome != 0);
+}
+
+/**
+ * 详细版本的 CQ 错误检查（用于调试）
+ * @param cq 要检查的 CQ
+ * @param out_syndrome 输出错误码
+ * @return true 如果有错误
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_check_cq_error_detailed(
+    nvshmemi_ibgda_device_cq_t *cq, uint8_t *out_syndrome) {
+    
+    if (cq == nullptr || cq->cqe == nullptr) {
+        *out_syndrome = 0;
+        return false;
+    }
+    
+    uint64_t cons_idx = (cq->cons_idx != nullptr) ? *cq->cons_idx : 0;
+    uint32_t cqe_idx = cons_idx & (cq->ncqes - 1);
+    
+    struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)((uintptr_t)cq->cqe + cqe_idx * sizeof(*cqe));
+    
+    uint8_t op_own = cqe->op_own;
+    uint8_t owner = op_own & MLX5_CQE_OWNER_MASK;
+    uint8_t expected_owner = (cons_idx & cq->ncqes) ? MLX5_CQE_OWNER_MASK : 0;
+    
+    if (owner != expected_owner) {
+        *out_syndrome = 0;
+        return false;
+    }
+    
+    uint8_t syndrome = (op_own >> 4) & 0xF;
+    *out_syndrome = syndrome;
+    
+    return (syndrome != 0);
+}
+
+/**
+ * 决定是否应该使用备份 QP
+ * 
+ * 逻辑：
+ * 1. 如果状态是 FAILED，直接返回 true
+ * 2. 如果状态是 RECOVERING，检查时间是否到了重试时刻
+ * 3. 如果状态是 GOOD 或 SUSPECTED，检查是否需要周期性检查 CQ
+ * 
+ * @param qp_idx RC QP 在数组中的索引
+ * @param cq 关联的 CQ
+ * @return true 表示使用备份 QP，false 表示使用主 QP
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_should_use_backup_qp(
+    int qp_idx, nvshmemi_ibgda_device_cq_t *cq) {
+    
+    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    
+    // 读取当前健康状态
+    uint8_t health = state->globalmem.rc_health_status[qp_idx];
+    
+    // 快速路径 1：如果已经标记为 FAILED，直接使用备份
+    if (health == IBGDA_QP_HEALTH_FAILED) {
+        // 检查是否到了恢复重试时间
+        uint64_t switch_time = state->globalmem.rc_switch_time[qp_idx];
+        if (ibgda_time_elapsed(switch_time, state->recovery_interval_cycles)) {
+            // 时间到了，尝试恢复：标记为 RECOVERING，使用主 QP
+            state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_RECOVERING;
+            state->globalmem.rc_failure_count[qp_idx] = 0;
+            return false;  // 尝试使用主 QP
+        }
+        return true;  // 继续使用备份 QP
+    }
+    
+    // 快速路径 2：如果状态是 GOOD，大部分情况直接返回
+    if (health == IBGDA_QP_HEALTH_GOOD) {
+        // 周期性检查：不是每次都检查，降低开销
+        uint64_t last_check = state->globalmem.rc_last_check_time[qp_idx];
+        uint64_t current = ibgda_get_clock_cycles();
+        
+        // 使用简单的计数器方式：每 check_interval 次检查一次
+        // 这里简化为基于周期的检查（每隔一定周期检查）
+        if ((current - last_check) < (state->recovery_interval_cycles / 10)) {
+            return false;  // 未到检查时间，使用主 QP
+        }
+        
+        // 到了检查时间，检查 CQ
+        state->globalmem.rc_last_check_time[qp_idx] = current;
+        
+        if (ibgda_check_cq_error_lightweight(cq)) {
+            // 检测到错误，增加失败计数
+            uint32_t fail_count = atomicAdd(&state->globalmem.rc_failure_count[qp_idx], 1);
+            if (fail_count >= state->failure_threshold - 1) {
+                // 达到阈值，切换到备份
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_FAILED;
+                state->globalmem.rc_switch_time[qp_idx] = current;
+                return true;
+            } else {
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_SUSPECTED;
+                return false;  // 还未达到阈值，继续使用主 QP
+            }
+        }
+        
+        return false;  // CQ 正常，使用主 QP
+    }
+    
+    // 状态为 SUSPECTED
+    if (health == IBGDA_QP_HEALTH_SUSPECTED) {
+        // 再次检查
+        if (ibgda_check_cq_error_lightweight(cq)) {
+            uint32_t fail_count = atomicAdd(&state->globalmem.rc_failure_count[qp_idx], 1);
+            if (fail_count >= state->failure_threshold - 1) {
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_FAILED;
+                state->globalmem.rc_switch_time[qp_idx] = ibgda_get_clock_cycles();
+                return true;
+            }
+        } else {
+            // 没有检测到错误，可能是临时问题，恢复到 GOOD
+            state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_GOOD;
+            state->globalmem.rc_failure_count[qp_idx] = 0;
+        }
+        return false;
+    }
+    
+    // 状态为 RECOVERING
+    if (health == IBGDA_QP_HEALTH_RECOVERING) {
+        // 使用主 QP，操作后会检查结果
+        return false;
+    }
+    
+    // 默认使用主 QP
+    return false;
+}
+
+/**
+ * 操作完成后更新 QP 健康状态
+ * 
+ * 此函数在操作完成后调用，根据操作结果更新健康状态：
+ * - 如果使用主 QP 且成功：保持或恢复到 GOOD
+ * - 如果使用主 QP 且失败：增加失败计数，可能切换
+ * - 如果使用备份 QP 且处于 RECOVERING：根据结果决定是否切回
+ * 
+ * @param qp_idx QP 索引
+ * @param is_backup 是否使用了备份 QP
+ * @param operation_success 操作是否成功
+ */
+__device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_update_qp_health_status(
+    int qp_idx, bool is_backup, bool operation_success) {
+    
+    if (qp_idx < 0) {
+        return;  // 不是 RC QP（可能是 DCI）
+    }
+    
+    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    uint8_t health = state->globalmem.rc_health_status[qp_idx];
+    
+    if (is_backup) {
+        // 使用了备份 QP
+        if (health == IBGDA_QP_HEALTH_RECOVERING) {
+            // 正在尝试恢复到主 QP，但这次仍使用备份（说明还没切回）
+            // 这种情况不应该发生，因为 RECOVERING 状态应该使用主 QP
+            // 保持当前状态
+        } else {
+            // FAILED 状态下使用备份 QP（正常情况）
+            // 不需要额外操作，等待时间到了自动重试
+        }
+    } else {
+        // 使用了主 QP
+        if (operation_success) {
+            // 操作成功
+            if (health == IBGDA_QP_HEALTH_RECOVERING) {
+                // 恢复成功！切回 GOOD 状态
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_GOOD;
+                state->globalmem.rc_failure_count[qp_idx] = 0;
+            } else if (health == IBGDA_QP_HEALTH_SUSPECTED || health == IBGDA_QP_HEALTH_GOOD) {
+                // 正常状态下成功，重置失败计数
+                if (state->globalmem.rc_failure_count[qp_idx] > 0) {
+                    state->globalmem.rc_failure_count[qp_idx] = 0;
+                }
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_GOOD;
+            }
+        } else {
+            // 操作失败
+            if (health == IBGDA_QP_HEALTH_RECOVERING) {
+                // 恢复失败，切回 FAILED 状态，并延长恢复间隔（避免频繁重试）
+                state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_FAILED;
+                state->globalmem.rc_switch_time[qp_idx] = ibgda_get_clock_cycles();
+                // 可选：增加失败计数或调整恢复间隔
+            } else {
+                // GOOD 或 SUSPECTED 状态下失败
+                uint32_t fail_count = atomicAdd(&state->globalmem.rc_failure_count[qp_idx], 1);
+                if (fail_count >= state->failure_threshold - 1) {
+                    state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_FAILED;
+                    state->globalmem.rc_switch_time[qp_idx] = ibgda_get_clock_cycles();
+                } else {
+                    state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_SUSPECTED;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 结束 CQ 状态检测与故障切换相关函数
+// ============================================================================
+
 // Prevent code reordering from both compiler and GPU
 __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void IBGDA_MFENCE() {
 #ifdef NVSHMEMI_IBGDA_PTX_OPTIMIZATION_MFENCE
@@ -1811,8 +2095,22 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
     return &state->globalmem.dcis[idx];
 }
 
-__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_rc(
-    int pe, bool *out_shared_among_ctas, nvshmemx_qp_handle_t qp_index = NVSHMEMX_QP_DEFAULT) {
+/**
+ * 获取 RC QP，支持自动故障切换
+ * 
+ * 这个函数替换原来的 ibgda_get_rc，增加了故障切换逻辑
+ * 
+ * @param pe 目标 PE
+ * @param out_shared_among_ctas 输出：QP 是否在 CTA 之间共享
+ * @param qp_index QP 索引
+ * @param out_is_backup 输出：是否使用了备份 QP
+ * @param out_qp_idx 输出：QP 在数组中的索引（用于后续状态更新）
+ * @return QP 指针（主 QP 或备份 QP）
+ */
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_rc_with_failover(
+    int pe, bool *out_shared_among_ctas, nvshmemx_qp_handle_t qp_index,
+    bool *out_is_backup, int *out_qp_idx) {
+    
     CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
     uint32_t rc_modulo;
     int qp_switch_group;
@@ -1820,9 +2118,9 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
     int ndevices_initialized = state->num_devices_initialized;
     uint32_t id = qp_index;
     uint32_t idx;
-
+    
     assert(pe != nvshmemi_device_state_d.mype);
-
+    
     if (qp_index == NVSHMEMX_QP_DEFAULT || qp_index == NVSHMEMX_QP_ANY) {
         rc_modulo = qp_index == NVSHMEMX_QP_ANY
                         ? state->num_rc_per_pe * ndevices_initialized
@@ -1833,19 +2131,71 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
     } else {
         idx = id + pe;
     }
-
+    
     *out_shared_among_ctas = true;
-    return &state->globalmem.rcs[idx];
+    *out_qp_idx = idx;
+    
+    // 获取主 QP
+    nvshmemi_ibgda_device_qp_t *primary_qp = &state->globalmem.rcs[idx];
+    
+    // 检查是否应该使用备份 QP（只有当备份 QP 存在时）
+    if (state->globalmem.backup_rcs != nullptr && state->globalmem.rc_health_status != nullptr) {
+        if (ibgda_should_use_backup_qp(idx, primary_qp->tx_wq.cq)) {
+            *out_is_backup = true;
+            return &state->globalmem.backup_rcs[idx];
+        }
+    }
+    
+    *out_is_backup = false;
+    return primary_qp;
 }
 
+/**
+ * 向后兼容的包装函数（不返回额外信息）
+ */
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_rc(
+    int pe, bool *out_shared_among_ctas, nvshmemx_qp_handle_t qp_index = NVSHMEMX_QP_DEFAULT) {
+    
+    bool is_backup;
+    int qp_idx;
+    return ibgda_get_rc_with_failover(pe, out_shared_among_ctas, qp_index, &is_backup, &qp_idx);
+}
+
+/**
+ * 获取 QP（RC 或 DCI），自动处理故障切换
+ * 
+ * @param pe 目标 PE
+ * @param out_shared_among_ctas 输出：是否共享
+ * @param qp_index QP 索引
+ * @param out_is_backup 输出：是否使用备份（仅对 RC 有效）
+ * @param out_qp_idx 输出：QP 索引（仅对 RC 有效）
+ * @return QP 指针
+ */
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_qp_with_failover(
+    int pe, bool *out_shared_among_ctas, nvshmemx_qp_handle_t qp_index,
+    bool *out_is_backup, int *out_qp_idx) {
+    
+    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    
+    if (ibgda_is_rc_enabled() && pe != nvshmemi_device_state_d.mype) {
+        return ibgda_get_rc_with_failover(pe, out_shared_among_ctas, qp_index, 
+                                         out_is_backup, out_qp_idx);
+    } else {
+        *out_is_backup = false;
+        *out_qp_idx = -1;
+        return ibgda_get_dci(pe, out_shared_among_ctas);
+    }
+}
+
+/**
+ * 向后兼容版本
+ */
 __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_qp(
     int pe, bool *out_shared_among_ctas, nvshmemx_qp_handle_t qp_index = NVSHMEMX_QP_DEFAULT) {
-    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
-
-    if (ibgda_is_rc_enabled() && pe != nvshmemi_device_state_d.mype)
-        return ibgda_get_rc(pe, out_shared_among_ctas, qp_index);
-    else
-        return ibgda_get_dci(pe, out_shared_among_ctas);
+    
+    bool is_backup;
+    int qp_idx;
+    return ibgda_get_qp_with_failover(pe, out_shared_among_ctas, qp_index, &is_backup, &qp_idx);
 }
 
 __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_get_lkey(
