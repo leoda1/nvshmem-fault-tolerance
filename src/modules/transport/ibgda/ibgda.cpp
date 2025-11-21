@@ -2162,7 +2162,7 @@ static int ibgda_create_backup_mapping(nvshmemt_ibgda_state_t *ibgda_state) {
         int dev_id = ibgda_state->dev_ids[i];
         int port_id = ibgda_state->port_ids[i];
         struct ibgda_device *device = &devices[dev_id];
-        int phys_port_cnt = device->common_device.device_attr.phys_port_cnt;
+        int phys_port_cnt = device->device_attr.phys_port_cnt;
 
         // Skip if backup is already assigned
         if (ibgda_state->backup_dev_ids[i] != -1) {
@@ -2180,7 +2180,7 @@ static int ibgda_create_backup_mapping(nvshmemt_ibgda_state_t *ibgda_state) {
                 struct ibgda_device *backup_device = &devices[backup_dev_id];
 
                 // Verify backup device is also single-port
-                if (backup_device->common_device.device_attr.phys_port_cnt == 1) {
+                if (backup_device->device_attr.phys_port_cnt == 1) {
                     // Create bidirectional mapping
                     ibgda_state->backup_dev_ids[i] = backup_dev_id;
                     ibgda_state->backup_port_ids[i] = backup_port_id;
@@ -2240,7 +2240,8 @@ static int ibgda_create_backup_mapping(nvshmemt_ibgda_state_t *ibgda_state) {
 }
 
 static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
-                                           struct ibgda_device *device, 
+                                           struct ibgda_device *device,
+                                           int curr_dev_id,
                                            int device_idx,
                                            int portid,
                                            nvshmem_transport_t t, 
@@ -2260,17 +2261,13 @@ static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
         return NVSHMEMX_SUCCESS;
     }
     
-    struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices + backup_dev_id;
-    
-    INFO(ibgda_state->log_level, "Creating backup RC QPs on backup device %d port %d for device_idx=%d", 
-         backup_dev_id, backup_port_id, device_idx);
     
     /* allocate local backup RC handles */
     local_backup_rc_handles = (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*local_backup_rc_handles));
     NVSHMEMI_NULL_ERROR_JMP(local_backup_rc_handles, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
                             "allocation of local_backup_rc_handles failed.\n");
     
-    /* Create backup RC QPs on the backup device */
+    /* create and assign backup RCs - exactly following main RC logic */
     for (int i = 0; i < num_rc_eps; ++i) {
         // Do not create loopback to self
         int dst_pe = (i + 1 + mype) % n_pes;
@@ -2279,50 +2276,43 @@ static int ibgda_setup_backup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
         if (dst_pe == mype) {
             continue;
         }
-        
-        // Create QP on backup device with backup port
-        status = ibgda_create_qp(&device->rc.backup_eps[mapped_i], backup_device, backup_port_id, 
-                                 mapped_i, NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC);
+        status = ibgda_create_qp(&device->rc.backup_eps[mapped_i], device, backup_port_id, mapped_i,
+                                 NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_create_qp failed on backup RC #%d.", mapped_i);
-        
-        status = ibgda_get_rc_handle(&local_backup_rc_handles[mapped_i], 
-                                     device->rc.backup_eps[mapped_i], backup_device);
+
+        status =
+            ibgda_get_rc_handle(&local_backup_rc_handles[mapped_i], device->rc.backup_eps[mapped_i], device);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_get_rc_handle failed on backup RC #%d.", mapped_i);
     }
-    
-    /* Exchange backup RC handles via alltoall */
+
     if (num_rc_eps) {
         status = t->boot_handle->alltoall(
             (void *)local_backup_rc_handles, (void *)device->rc.backup_peer_ep_handles,
             sizeof(*local_backup_rc_handles) * num_eps_per_pe, t->boot_handle);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "alltoall of backup rc failed.");
     }
-    
-    /* QP state transitions for backup RCs */
+
     for (int i = 0; i < num_rc_eps; ++i) {
         // No loopback to self
         if (i / num_eps_per_pe == mype) {
             continue;
         }
-        
-        // RST → INIT
-        status = ibgda_qp_rst2init(device->rc.backup_eps[i], backup_device, backup_port_id);
+        status = ibgda_qp_rst2init(device->rc.backup_eps[i], device, backup_port_id);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_qp_rst2init failed on backup RC #%d.", i);
-        
-        // INIT → RTR
-        status = ibgda_rc_init2rtr(ibgda_state, device->rc.backup_eps[i], backup_device, backup_port_id,
+
+        status = ibgda_rc_init2rtr(ibgda_state, device->rc.backup_eps[i], device, backup_port_id,
                                    &device->rc.backup_peer_ep_handles[i]);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_rc_init2rtr failed on backup RC #%d.", i);
-        
-        // RTR → RTS
-        status = ibgda_qp_rtr2rts(device->rc.backup_eps[i], backup_device, backup_port_id);
+
+        status = ibgda_qp_rtr2rts(device->rc.backup_eps[i], device, backup_port_id);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                               "ibgda_qp_rtr2rts failed on backup RC #%d.", i);
     }
+    /* create and assign backup RCs end */
     
     device->rc.num_backup_eps_per_pe = num_eps_per_pe;
     device->rc.backup_dev_id = backup_dev_id;
@@ -3523,8 +3513,8 @@ int nvshmemt_ibgda_connect_endpoints(nvshmem_transport_t t, int *selected_dev_id
 
         /* create and assign backup RCs start */
         if (num_rc_eps > 0) {
-            status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, selected_dev_ids[i], 
-                                                     portid, t, num_rc_eps_per_pe);
+            status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, curr_dev_id, 
+                                                     selected_dev_ids[i], portid, t, num_rc_eps_per_pe);
             NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                                   "ibgda_setup_backup_rc_endpoints failed.");
         }

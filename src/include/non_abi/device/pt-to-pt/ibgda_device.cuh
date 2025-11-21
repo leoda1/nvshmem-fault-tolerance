@@ -2,7 +2,7 @@
  * Copyright (c) 2016-2025, NVIDIA CORPORATION. All rights reserved.
  *
  * See License.txt for license information
- */
+*/
 
 #ifndef _NVSHMEMI_IBGDA_DEVICE_H_
 #define _NVSHMEMI_IBGDA_DEVICE_H_
@@ -316,7 +316,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_check_cq_error_detailed(
 __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE bool ibgda_should_use_backup_qp(
     int qp_idx, nvshmemi_ibgda_device_cq_t *cq) {
     
-    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
     
     // 读取当前健康状态
     uint8_t health = state->globalmem.rc_health_status[qp_idx];
@@ -413,7 +413,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_update_qp_health_status(
         return;  // 不是 RC QP（可能是 DCI）
     }
     
-    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
     uint8_t health = state->globalmem.rc_health_status[qp_idx];
     
     if (is_backup) {
@@ -2111,7 +2111,7 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
     int pe, bool *out_shared_among_ctas,
     bool *out_is_backup, int *out_qp_idx) {
     
-    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
     uint32_t rc_modulo;
     int qp_switch_group;
     uint32_t id;
@@ -2190,7 +2190,7 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
     int pe, bool *out_shared_among_ctas,
     bool *out_is_backup, int *out_qp_idx) {
     
-    CONSTANT_ADDRESS_SPACE nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
     
     if (ibgda_is_rc_enabled() && pe != nvshmemi_device_state_d.mype) {
         return ibgda_get_rc_with_failover(pe, out_shared_among_ctas, 
