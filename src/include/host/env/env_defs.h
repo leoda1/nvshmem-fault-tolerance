@@ -342,6 +342,19 @@ NVSHMEMI_ENV_DEF(NVTX, string, "off", NVSHMEMI_ENV_CAT_NVTX,
 /** GPU-initiated communication **/
 NVSHMEMI_ENV_DEF(IB_ENABLE_IBGDA, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Set to enable GPU-initiated communication transport.")
+
+/** IBGDA Fault Detection and Failover **/
+NVSHMEMI_ENV_DEF(IBGDA_FAILURE_THRESHOLD, int, 3, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Number of consecutive CQ errors before switching to backup QP.\n"
+                 "Default: 3. Higher values reduce false positives but increase detection latency.")
+
+NVSHMEMI_ENV_DEF(IBGDA_RECOVERY_INTERVAL, int, 1000, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Time interval (in milliseconds) between attempts to recover from backup to primary QP.\n"
+                 "Default: 1000ms (1 second). Higher values reduce recovery overhead but prolong recovery time.")
+
+NVSHMEMI_ENV_DEF(IBGDA_CHECK_INTERVAL, int, 16, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Number of operations between periodic CQ health checks.\n"
+                 "Default: 16. Lower values provide faster error detection but slightly higher overhead.")
 #endif
 
 #endif
