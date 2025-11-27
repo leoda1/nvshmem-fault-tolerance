@@ -102,7 +102,7 @@
         state.globalmem.dcts = NULL;                                       \
         state.globalmem.lkeys = NULL;                                      \
         state.globalmem.rkeys = NULL;                                      \
-        state.extra = NULL;                                                \
+        state.ff = NULL;                                                \
     } while (0);
 
 #else
@@ -220,6 +220,34 @@ static_assert(sizeof(nvshmemi_ibgda_device_local_only_mhandle_v1) == 96,
 
 typedef nvshmemi_ibgda_device_local_only_mhandle_v1 nvshmemi_ibgda_device_local_only_mhandle_t;
 
+// QP health status for fault tolerance
+typedef enum {
+    IBGDA_QP_HEALTH_GOOD = 0,        // QP 健康，使用主 QP
+    IBGDA_QP_HEALTH_SUSPECTED = 1,   // 检测到失败，但未达到阈值
+    IBGDA_QP_HEALTH_FAILED = 2,      // 已切换到备份 QP
+    IBGDA_QP_HEALTH_RECOVERING = 3   // 正在尝试切回主 QP
+} ibgda_qp_health_status_t;
+
+typedef struct {
+    // Backup RC connections
+    uint32_t num_backup_rc_per_pe;               // 每个 PE 的备份 RC 数量
+    int num_default_rc_per_pe;                   // 默认 RC 数量（用于恢复）
+    nvshmemi_ibgda_device_qp_t *backup_rcs;      // 备份 RC QP 数组
+    nvshmemi_ibgda_device_cq_t *backup_cqs;      // 备份 CQ 数组
+    
+    // Health monitoring (per RC connection)
+    uint8_t *rc_health_status;                   // ibgda_qp_health_status_t
+    uint32_t *rc_failure_count;                  // 连续失败计数
+    uint64_t *rc_last_check_time;                // 上次检查时间（clock64 周期数）
+    uint64_t *rc_switch_time;                    // 切换时间戳
+    
+    // Configuration parameters
+    uint64_t recovery_interval_cycles;           // 恢复重试间隔（GPU 时钟周期）
+    uint32_t failure_threshold;                  // 连续失败多少次触发切换
+    uint32_t check_interval;                     // 每隔多少次操作检查一次 CQ
+    float gpu_clock_freq_ghz;                    // GPU 时钟频率
+} nvshmemi_ibgda_ft_state_t;
+
 // This is a stable structure.
 typedef struct {
     __be32 key;
@@ -275,7 +303,7 @@ typedef struct {
         nvshmemi_ibgda_device_key_t *rkeys;
     } globalmem;
 
-    void *extra;
+    nvshmemi_ibgda_ft_state_t *ff;  // Fault tolerance state (NULL if not enabled)
     uint8_t reserved[NVSHMEMI_IBGDA_STATE_PADDING];
 } nvshmemi_ibgda_device_state_v1;
 static_assert(sizeof(nvshmemi_ibgda_device_state_v1) == 8384,
