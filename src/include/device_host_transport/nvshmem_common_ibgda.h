@@ -232,6 +232,7 @@ typedef struct {
     // Backup RC connections
     uint32_t num_backup_rc_per_pe;               // 每个 PE 的备份 RC 数量
     int num_default_rc_per_pe;                   // 默认 RC 数量（用于恢复）
+    int num_backup_devices;                      // Number of backup devices (for FT lkey/rkey indexing)
     nvshmemi_ibgda_device_qp_t *backup_rcs;      // 备份 RC QP 数组
     nvshmemi_ibgda_device_cq_t *backup_cqs;      // 备份 CQ 数组
     

@@ -2,7 +2,7 @@
  * Copyright (c) 2016-2025, NVIDIA CORPORATION. All rights reserved.
  *
  * See License.txt for license information
- */
+*/
 
 #ifndef _NVSHMEMI_IBGDA_DEVICE_H_
 #define _NVSHMEMI_IBGDA_DEVICE_H_
@@ -1866,10 +1866,17 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_get_lkey(
     uint64_t heap_start = (uint64_t)nvshmemi_device_state_d.heap_base;
     uint64_t heap_end = heap_start + nvshmemi_device_state_d.heap_size - 1;
     size_t max_len = 1ULL << 30;
+    
+    // Total devices includes both primary and backup devices for FT lkey/rkey indexing
+    // Primary QPs use dev_idx in [0, num_devices_initialized)
+    // Backup QPs use dev_idx in [num_devices_initialized, num_devices_initialized + num_backup_devices)
+    int num_backup_devs = state->ff ? state->ff->num_backup_devices : 0;
+    int total_devs = state->num_devices_initialized + num_backup_devs;
+    
     if (heap_start <= addr && addr <= heap_end) {
         // addr in the symmetric heap
         uint64_t idx = ((addr - heap_start) >> state->log2_cumem_granularity) *
-                           state->num_devices_initialized +
+                           total_devs +
                        dev_idx;
         nvshmemi_ibgda_device_key_t device_key;
 
@@ -1919,9 +1926,15 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_get_raddr_rk
     // most of the time, so the performance hit is minimal.
     asm volatile("ld.b32 %0, [%1];" : "=r"(npes) : "l"(&nvshmemi_device_state_d.npes));
 
+    // Total devices includes both primary and backup devices for FT lkey/rkey indexing
+    // Primary QPs use dev_idx in [0, num_devices_initialized)
+    // Backup QPs use dev_idx in [num_devices_initialized, num_devices_initialized + num_backup_devices)
+    int num_backup_devs = state->ff ? state->ff->num_backup_devices : 0;
+    int total_devs = state->num_devices_initialized + num_backup_devs;
+
     uint64_t idx =
-        ((roffset >> state->log2_cumem_granularity) * npes * state->num_devices_initialized) +
-        (proxy_pe * state->num_devices_initialized) + dev_idx;
+        ((roffset >> state->log2_cumem_granularity) * npes * total_devs) +
+        (proxy_pe * total_devs) + dev_idx;
     nvshmemi_ibgda_device_key_t device_key;
     uint64_t raddr;
 
@@ -1930,6 +1943,13 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_get_raddr_rk
     else
         device_key = state->globalmem.rkeys[idx - NVSHMEMI_IBGDA_MAX_CONST_RKEYS];
 
+    if (roffset >= device_key.next_addr) {
+        printf("ibgda_get_raddr_rkey FAIL: roffset=%lu, next_addr=%lu, idx=%lu, "
+               "dev_idx=%u, proxy_pe=%d, npes=%d, total_devs=%d, "
+               "num_devices_initialized=%d, num_backup_devs=%d\n",
+               roffset, device_key.next_addr, idx, dev_idx, proxy_pe, npes, total_devs,
+               state->num_devices_initialized, num_backup_devs);
+    }
     assert(roffset < device_key.next_addr);
 
     raddr = (uint64_t)nvshmemi_device_state_d.peer_heap_base_remote[proxy_pe] + roffset;

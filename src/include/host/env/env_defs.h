@@ -342,6 +342,11 @@ NVSHMEMI_ENV_DEF(NVTX, string, "off", NVSHMEMI_ENV_CAT_NVTX,
 /** GPU-initiated communication **/
 NVSHMEMI_ENV_DEF(IB_ENABLE_IBGDA, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Set to enable GPU-initiated communication transport.")
+NVSHMEMI_ENV_DEF(IBGDA_ENABLE_MULTI_PORT, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Enable multiple NICs per PE if available. Note: Enabling this on "
+                 "Hopper+ for latency sensitive applications is discouraged.")
+NVSHMEMI_ENV_DEF(IBGDA_ENABLE_FAULT_TOLERANCE, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Enable IBGDA fault tolerance (backup RC/CQ creation). Requires multi-port NIC selection.")
 #endif
 
 #endif
