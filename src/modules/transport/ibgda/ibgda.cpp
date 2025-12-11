@@ -595,14 +595,17 @@ int nvshmemt_ibgda_get_mem_handle(nvshmem_mem_handle_t *mem_handle, void *buf, s
     handle->num_backup_devs = 0;
     if (ibgda_state->fault_tolerance_enabled && ibgda_state->backup_dev_ids) {
         for (int i = 0; i < n_devs_selected; ++i) {
-            int backup_dev_id = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
-            if (backup_dev_id < 0) {
+            int backup_entry_idx = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
+            if (backup_entry_idx < 0) {
                 continue;
             }
 
             int total_used = handle->num_devs + handle->num_backup_devs;
             assert(total_used < NVSHMEMI_IBGDA_MAX_DEVICES_PER_PE);
 
+            // `backup_entry_idx` is an entry index into the selected/dev list. Map it
+            // to the actual device id stored in `dev_ids` before indexing `devices`.
+            int backup_dev_id = ibgda_state->dev_ids[backup_entry_idx];
             struct ibgda_device *backup_device =
                 ((struct ibgda_device *)ibgda_state->devices + backup_dev_id);
             nvshmem_mem_handle_t *backup_handle =
@@ -610,7 +613,8 @@ int nvshmemt_ibgda_get_mem_handle(nvshmem_mem_handle_t *mem_handle, void *buf, s
 
             INFO(ibgda_state->log_level,
                  "[%d] IBGDA: registering MR on backup device %s for primary device %d",
-                 transport->my_pe, backup_device->dev->name, ibgda_state->selected_dev_ids[i]);
+                 transport->my_pe, backup_device->dev ? backup_device->dev->name : "(null)",
+                 ibgda_state->selected_dev_ids[i]);
 
             status = nvshmemt_ib_common_reg_mem_handle(
                 &ftable, &mlx5dv_ftable, backup_device->pd, backup_handle, buf, length, local_only,
@@ -2733,12 +2737,12 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     nvshmemi_ibgda_device_qp_t *backup_rc_d = NULL;
     nvshmemi_ibgda_device_qp_t *backup_rc_h = NULL;
 
-    nvshmemi_ibgda_device_cq_t *backup_cq_d = NULL;
-    nvshmemi_ibgda_device_cq_t *backup_cq_h = NULL;
-
     nvshmemi_ibgda_device_cq_t *cq_d = NULL;
     nvshmemi_ibgda_device_cq_t *cq_h = NULL;
 
+    nvshmemi_ibgda_device_cq_t *backup_cq_d = NULL;
+    nvshmemi_ibgda_device_cq_t *backup_cq_h = NULL;
+    
     uint8_t *qp_group_switches_d = NULL;
 
     // Fault tolerance state pointers (declared here to avoid goto crossing initialization)
@@ -2765,6 +2769,7 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     int num_cq_handles = 0;
     int num_dci_handles = 0;
     int num_backup_cq_handles = 0;
+    int actual_backup_devs = 0;
     int num_shared_dci_handles = 0;
     int status = 0;
     int cq_idx = 0;
@@ -2792,7 +2797,7 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
         // Each active QP contributes a send and recv CQ entry. Backup RC CQs are allocated
         // separately to keep failover bookkeeping isolated.
         num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * (n_pes - 1));
-        num_backup_cq_handles += device->rc.num_backup_eps_per_pe * n_pes * 2;
+        num_backup_cq_handles += device->rc.num_backup_eps_per_pe * (n_pes - 1);
         num_shared_dci_handles += device->dci.num_shared_eps;
     }
     assert(num_dci_handles - num_shared_dci_handles >= 0);
@@ -2823,9 +2828,9 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
 
         backup_rc_h = (nvshmemi_ibgda_device_qp_t *)calloc(num_backup_rc_handles, sizeof(*backup_rc_h));
         NVSHMEMI_NULL_ERROR_JMP(backup_rc_h, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out, "backup_rc calloc err.");
-        for (int i = 0; i < num_backup_rc_handles; i++) {
-            nvshmemi_init_ibgda_device_qp(backup_rc_h[i]);
-        }
+        // for (int i = 0; i < num_backup_rc_handles; i++) {
+        //     nvshmemi_init_ibgda_device_qp(backup_rc_h[i]);
+        // }
     }
 
     cq_h = (nvshmemi_ibgda_device_cq_t *)calloc(num_cq_handles, sizeof(*cq_h));
@@ -2833,17 +2838,16 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     for (int i = 0; i < num_cq_handles; i++) {
         nvshmemi_init_ibgda_device_cq(cq_h[i]);
     }
-
-    if (num_backup_cq_handles > 0) {
-        backup_cq_h = (nvshmemi_ibgda_device_cq_t *)calloc(num_backup_cq_handles, sizeof(*backup_cq_h));
-        NVSHMEMI_NULL_ERROR_JMP(backup_cq_h, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
-                                "backup_cq_h calloc err.");
-        for (int i = 0; i < num_backup_cq_handles; i++) {
-            nvshmemi_init_ibgda_device_cq(backup_cq_h[i]);
-        }
-        ibgda_state->last_num_backup_cqs = num_backup_cq_handles;
-        ibgda_state->last_num_cqs = num_cq_handles;
+    backup_cq_h = (nvshmemi_ibgda_device_cq_t *)calloc(num_backup_cq_handles, sizeof(*backup_cq_h));
+    NVSHMEMI_NULL_ERROR_JMP(backup_cq_h, status, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+                            "backup_cq_h calloc err.");
+    for (int i = 0; i < num_backup_cq_handles; i++) {
+        nvshmemi_init_ibgda_device_cq(backup_cq_h[i]);
     }
+
+    ibgda_state->last_num_backup_cqs = num_backup_cq_handles;
+    ibgda_state->last_num_cqs = num_cq_handles;
+
     /* allocate host memory for dct, rc, cq, dci end */
 
     /* allocate device memory for dct, rc, cq, dci start */
@@ -2961,11 +2965,20 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
                 int arr_idx = arr_offset + j;
                 int dev_idx = ibgda_state->selected_dev_ids[j];
                 struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+                int backup_dev_entry = ibgda_state->backup_dev_ids[dev_idx];
+                if (backup_dev_entry < 0) {
+                    NVSHMEMI_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                                       "backup_dev_entry is invalid for primary dev %d", dev_idx);
+                }
+                struct ibgda_device *backup_device =
+                    (struct ibgda_device *)ibgda_state->devices + backup_dev_entry;
+                int backup_dev_slot = j;  // backup dev_idx in [primary, primary+1)
                 uintptr_t base_mvars_d_addr = (uintptr_t)(&backup_rc_d[arr_idx]) + mvars_offset;
 
                 // Use n_devs_selected + j as dev_idx for backup QPs so they index into
                 // the backup portion of lkeys/rkeys tables (indices [n_devs_selected, total_devs))
-                ibgda_get_device_qp(&backup_rc_h[arr_idx], device, device->rc.backup_eps[i], i, n_devs_selected + j);
+                ibgda_get_device_qp(&backup_rc_h[arr_idx], backup_device, device->rc.backup_eps[i], i,
+                                    n_devs_selected + backup_dev_slot);
 
                 backup_rc_h[arr_idx].tx_wq.cq = &backup_cq_d[backup_cq_idx];
 
@@ -3012,7 +3025,9 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
         status = cudaMemcpyAsync(rc_d, (const void *)rc_h, sizeof(*rc_h) * num_rc_handles,
                                  cudaMemcpyHostToDevice, ibgda_state->my_stream);
         NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "rc copy err.");
+    }
 
+    if (num_backup_rc_handles > 0) {
         status = cudaMemcpyAsync(backup_rc_d, (const void *)backup_rc_h, sizeof(*backup_rc_h) * num_backup_rc_handles,
                                  cudaMemcpyHostToDevice, ibgda_state->my_stream);
         NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "backup_rc copy err.");
@@ -3021,13 +3036,10 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
     status = cudaMemcpyAsync(cq_d, (const void *)cq_h, sizeof(*cq_h) * num_cq_handles,
                              cudaMemcpyHostToDevice, ibgda_state->my_stream);
     NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "cq copy err.");
-
-    if (num_backup_cq_handles > 0) {
-        status = cudaMemcpyAsync(backup_cq_d, (const void *)backup_cq_h,
-                                 sizeof(*backup_cq_h) * num_backup_cq_handles,
-                                 cudaMemcpyHostToDevice, ibgda_state->my_stream);
-        NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "backup_cq copy err.");
-    }
+    status = cudaMemcpyAsync(backup_cq_d, (const void *)backup_cq_h,
+                                sizeof(*backup_cq_h) * num_backup_cq_handles,
+                                cudaMemcpyHostToDevice, ibgda_state->my_stream);
+    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "backup_cq copy err.");
     /* Copy host side structs to device side structs end */
 
     /* Post the device state start */
@@ -3071,7 +3083,6 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
         // Set num_backup_devices for FT lkey/rkey indexing
         // Count actual number of backup devices (those with valid backup_dev_ids)
         // Backup QPs use dev_idx in range [n_devs_selected, n_devs_selected + num_backup_devices)
-        int actual_backup_devs = 0;
         for (int i = 0; i < n_devs_selected; ++i) {
             int backup_dev_id = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
             if (backup_dev_id >= 0) {
@@ -3079,7 +3090,7 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
             }
         }
         ft_state_h->num_backup_devices = actual_backup_devs;
-        printf("actual_backup_devs=%d\n", actual_backup_devs);
+        ft_state_h->num_primary_devices = n_devs_selected;
         ft_state_h->num_default_rc_per_pe = num_rc_handles / n_devs_selected / n_pes;
 
         // Initialize health management arrays for fault tolerance
@@ -3490,8 +3501,8 @@ int nvshmemt_ibgda_connect_endpoints(nvshmem_transport_t t, int *selected_dev_id
                        primary_device_ref->rc.backup_peer_ep_handles[rc_idx].qpn,
                        rc_idx / num_rc_eps_per_pe);
             }
-            INFO(ibgda_state->log_level, "Creating %d Backup RC QPs", device->rc.num_backup_eps_per_pe);
             primary_device_ref->rc.num_backup_eps_per_pe = num_rc_eps_per_pe;
+            INFO(ibgda_state->log_level, "Creating %d Backup RC QPs", num_rc_eps_per_pe);
             primary_device_ref->rc.backup_dev_id = curr_dev_id;
             primary_device_ref->rc.backup_port_id = backup_portid;
 
@@ -3833,6 +3844,7 @@ out:
 
 int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
     struct ibgda_device *device = NULL;
+    struct ibgda_device *backup_device = NULL;
     assert(transport != NULL);
     nvshmemt_ibgda_state_t *ibgda_state = (nvshmemt_ibgda_state_t *)transport->state;
     nvshmemi_ibgda_device_state_t *ibgda_device_state_h;
@@ -3884,6 +3896,8 @@ int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
     for (int i = 0; i < ibgda_state->n_devs_selected; i++) {
         dev_id = ibgda_state->selected_dev_ids[i];
         device = ((struct ibgda_device *)ibgda_state->devices + dev_id);
+        int backup_dev_id = device->rc.backup_dev_id;
+        backup_device = ((struct ibgda_device *)ibgda_state->devices + backup_dev_id);
 
         for (int i = 0; i < device->dci.num_eps; ++i) {
             status = ibgda_destroy_ep(device->dci.eps[i]);
@@ -3915,13 +3929,18 @@ int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
 
         status = ibgda_destroy_qp_shared_objects(ibgda_state, device);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                              "ibgda_destroy_qp_shared_objects failed.\n");
+                              "ibgda_destroy_qp_shared_objects failed for primary device.\n");
 
         status = ibgda_destroy_dct_shared_objects(ibgda_state, device);
         NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                              "ibgda_destroy_dct_shared_objects failed.\n");
+                              "ibgda_destroy_dct_shared_objects failed for primary device.\n");
+
+        status = ibgda_destroy_qp_shared_objects(ibgda_state, backup_device);
+        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+                              "ibgda_destroy_qp_shared_objects failed for backup device.\n");
 
         ibgda_destroy_cq_shared_objects(ibgda_state, device);
+        ibgda_destroy_cq_shared_objects(ibgda_state, backup_device);
     }
 
     /* Free all devices, not just ones we used. */
