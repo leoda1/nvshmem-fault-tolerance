@@ -2514,201 +2514,201 @@ static void ibgda_get_device_qp(nvshmemi_ibgda_device_qp_t *dev_qp, struct ibgda
     ibgda_get_device_qp_mvars(&dev_qp->mvars, device, ep);
 }
 
-/* =============================================================================
- * GPU STATE SETUP HELPER FUNCTIONS - Forward Declarations
- * ============================================================================= */
+// /* =============================================================================
+//  * GPU STATE SETUP HELPER FUNCTIONS - Forward Declarations
+//  * ============================================================================= */
 
-static int ibgda_init_health_management_arrays(nvshmemt_ibgda_state_t *ibgda_state,
-                                               nvshmem_transport_t t,
-                                               int num_rc_handles,
-                                               nvshmemi_ibgda_ft_state_t *ft_state_h);
+// static int ibgda_init_health_management_arrays(nvshmemt_ibgda_state_t *ibgda_state,
+//                                                nvshmem_transport_t t,
+//                                                int num_rc_handles,
+//                                                nvshmemi_ibgda_ft_state_t *ft_state_h);
 
-static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state,
-                                             nvshmemi_ibgda_ft_state_t *ft_state_h);
+// static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state,
+//                                              nvshmemi_ibgda_ft_state_t *ft_state_h);
 
-/* =============================================================================
- * GPU STATE SETUP HELPER FUNCTIONS
- * ============================================================================= */
+// /* =============================================================================
+//  * GPU STATE SETUP HELPER FUNCTIONS
+//  * ============================================================================= */
 
-/**
- * 分配和初始化健康管理数组
- * 为每个 RC QP 分配健康状态跟踪数组（设备端）
- */
-static int ibgda_init_health_management_arrays(nvshmemt_ibgda_state_t *ibgda_state,
-                                               nvshmem_transport_t t,
-                                               int num_rc_handles,
-                                               nvshmemi_ibgda_ft_state_t *ft_state_h) {
-    int status = 0;
-    int n_pes = t->n_pes;
-    int n_devs_selected = ibgda_state->n_devs_selected;
+// /**
+//  * 分配和初始化健康管理数组
+//  * 为每个 RC QP 分配健康状态跟踪数组（设备端）
+//  */
+// static int ibgda_init_health_management_arrays(nvshmemt_ibgda_state_t *ibgda_state,
+//                                                nvshmem_transport_t t,
+//                                                int num_rc_handles,
+//                                                nvshmemi_ibgda_ft_state_t *ft_state_h) {
+//     int status = 0;
+//     int n_pes = t->n_pes;
+//     int n_devs_selected = ibgda_state->n_devs_selected;
 
-    if (!ft_state_h) {
-        return 0;  // No fault tolerance state to initialize
-    }
+//     if (!ft_state_h) {
+//         return 0;  // No fault tolerance state to initialize
+//     }
 
-    // 计算实际需要的 RC 数量（排除 loopback）
-    int total_rc_count = 0;
-    for (int j = 0; j < n_devs_selected; j++) {
-        int dev_idx = ibgda_state->selected_dev_ids[j];
-        struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
-        int num_eps_per_pe = device->rc.num_eps_per_pe;
+//     // 计算实际需要的 RC 数量（排除 loopback）
+//     int total_rc_count = 0;
+//     for (int j = 0; j < n_devs_selected; j++) {
+//         int dev_idx = ibgda_state->selected_dev_ids[j];
+//         struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+//         int num_eps_per_pe = device->rc.num_eps_per_pe;
         
-        for (int i = 0; i < num_eps_per_pe; i++) {
-            for (int pe = 0; pe < n_pes; pe++) {
-                if (pe != t->my_pe) {
-                    total_rc_count++;
-                }
-            }
-        }
-    }
+//         for (int i = 0; i < num_eps_per_pe; i++) {
+//             for (int pe = 0; pe < n_pes; pe++) {
+//                 if (pe != t->my_pe) {
+//                     total_rc_count++;
+//                 }
+//             }
+//         }
+//     }
 
-    if (total_rc_count == 0) {
-        INFO(ibgda_state->log_level, "No RC QPs to track (total_rc_count=0), skipping health management arrays\n");
-        return 0;
-    }
+//     if (total_rc_count == 0) {
+//         INFO(ibgda_state->log_level, "No RC QPs to track (total_rc_count=0), skipping health management arrays\n");
+//         return 0;
+//     }
 
-    INFO(ibgda_state->log_level, "Allocating health management arrays for %d RC QPs\n", total_rc_count);
+    // INFO(ibgda_state->log_level, "Allocating health management arrays for %d RC QPs\n", total_rc_count);
 
-    uint8_t *rc_health_status_d = NULL;
-    uint32_t *rc_failure_count_d = NULL;
-    uint64_t *rc_last_check_time_d = NULL;
-    uint64_t *rc_switch_time_d = NULL;
+    // uint8_t *rc_health_status_d = NULL;
+    // uint32_t *rc_failure_count_d = NULL;
+    // uint64_t *rc_last_check_time_d = NULL;
+    // uint64_t *rc_switch_time_d = NULL;
 
-    status = cudaMalloc(&rc_health_status_d, total_rc_count * sizeof(uint8_t));
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
-                          "cudaMalloc for rc_health_status failed\n");
+    // status = cudaMalloc(&rc_health_status_d, total_rc_count * sizeof(uint8_t));
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+    //                       "cudaMalloc for rc_health_status failed\n");
 
-    status = cudaMalloc(&rc_failure_count_d, total_rc_count * sizeof(uint32_t));
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
-                          "cudaMalloc for rc_failure_count failed\n");
+    // status = cudaMalloc(&rc_failure_count_d, total_rc_count * sizeof(uint32_t));
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+    //                       "cudaMalloc for rc_failure_count failed\n");
 
-    status = cudaMalloc(&rc_last_check_time_d, total_rc_count * sizeof(uint64_t));
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
-                          "cudaMalloc for rc_last_check_time failed\n");
+    // status = cudaMalloc(&rc_last_check_time_d, total_rc_count * sizeof(uint64_t));
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+    //                       "cudaMalloc for rc_last_check_time failed\n");
 
-    status = cudaMalloc(&rc_switch_time_d, total_rc_count * sizeof(uint64_t));
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
-                          "cudaMalloc for rc_switch_time failed\n");
+    // status = cudaMalloc(&rc_switch_time_d, total_rc_count * sizeof(uint64_t));
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_OUT_OF_MEMORY, out,
+    //                       "cudaMalloc for rc_switch_time failed\n");
 
-    status = cudaMemsetAsync(rc_health_status_d, IBGDA_QP_HEALTH_GOOD,
-                            total_rc_count * sizeof(uint8_t),
-                            ibgda_state->my_stream);
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
-                          "cudaMemset for rc_health_status failed\n");
+    // status = cudaMemsetAsync(rc_health_status_d, IBGDA_QP_HEALTH_GOOD,
+    //                         total_rc_count * sizeof(uint8_t),
+    //                         ibgda_state->my_stream);
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
+    //                       "cudaMemset for rc_health_status failed\n");
 
-    status = cudaMemsetAsync(rc_failure_count_d, 0, total_rc_count * sizeof(uint32_t),
-                            ibgda_state->my_stream);
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
-                          "cudaMemset for rc_failure_count failed\n");
+    // status = cudaMemsetAsync(rc_failure_count_d, 0, total_rc_count * sizeof(uint32_t),
+    //                         ibgda_state->my_stream);
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
+    //                       "cudaMemset for rc_failure_count failed\n");
 
-    status = cudaMemsetAsync(rc_last_check_time_d, 0, total_rc_count * sizeof(uint64_t),
-                            ibgda_state->my_stream);
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
-                          "cudaMemset for rc_last_check_time failed\n");
+    // status = cudaMemsetAsync(rc_last_check_time_d, 0, total_rc_count * sizeof(uint64_t),
+    //                         ibgda_state->my_stream);
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
+    //                       "cudaMemset for rc_last_check_time failed\n");
 
-    status = cudaMemsetAsync(rc_switch_time_d, 0, total_rc_count * sizeof(uint64_t),
-                            ibgda_state->my_stream);
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
-                          "cudaMemset for rc_switch_time failed\n");
+    // status = cudaMemsetAsync(rc_switch_time_d, 0, total_rc_count * sizeof(uint64_t),
+    //                         ibgda_state->my_stream);
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
+    //                       "cudaMemset for rc_switch_time failed\n");
 
-    status = cudaStreamSynchronize(ibgda_state->my_stream);
-    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
-                          "stream sync failed\n");
+    // status = cudaStreamSynchronize(ibgda_state->my_stream);
+    // NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out,
+    //                       "stream sync failed\n");
 
-    ft_state_h->rc_health_status = rc_health_status_d;
-    ft_state_h->rc_failure_count = rc_failure_count_d;
-    ft_state_h->rc_last_check_time = rc_last_check_time_d;
-    ft_state_h->rc_switch_time = rc_switch_time_d;
+    // ft_state_h->rc_health_status = rc_health_status_d;
+    // ft_state_h->rc_failure_count = rc_failure_count_d;
+    // ft_state_h->rc_last_check_time = rc_last_check_time_d;
+    // ft_state_h->rc_switch_time = rc_switch_time_d;
 
-    INFO(ibgda_state->log_level, "Successfully allocated and initialized health management arrays\n");
+    // INFO(ibgda_state->log_level, "Successfully allocated and initialized health management arrays\n");
 
-    return 0;
+    // return 0;
 
-out:
-    if (rc_health_status_d) cudaFree(rc_health_status_d);
-    if (rc_failure_count_d) cudaFree(rc_failure_count_d);
-    if (rc_last_check_time_d) cudaFree(rc_last_check_time_d);
-    if (rc_switch_time_d) cudaFree(rc_switch_time_d);
-    return status;
-}
+// out:
+    // if (rc_health_status_d) cudaFree(rc_health_status_d);
+    // if (rc_failure_count_d) cudaFree(rc_failure_count_d);
+    // if (rc_last_check_time_d) cudaFree(rc_last_check_time_d);
+    // if (rc_switch_time_d) cudaFree(rc_switch_time_d);
+    // return status;
+// }
 
-/**
- * 获取 GPU 时钟频率（GHz）
- */
-static int ibgda_get_gpu_clock_freq(float *gpu_clock_freq_ghz) {
-    int status = 0;
-    int clock_rate_khz = 0;
+// /**
+//  * 获取 GPU 时钟频率（GHz）
+//  */
+// static int ibgda_get_gpu_clock_freq(float *gpu_clock_freq_ghz) {
+//     int status = 0;
+//     int clock_rate_khz = 0;
 
-    // 获取当前 GPU 设备
-    int device_id;
-    status = cudaGetDevice(&device_id);
-    if (status != cudaSuccess) {
-        NVSHMEMI_WARN_PRINT("Failed to get current GPU device, using default clock freq\n");
-        *gpu_clock_freq_ghz = 1.5f;  // 默认值
-        return 0;
-    }
+//     // 获取当前 GPU 设备
+//     int device_id;
+//     status = cudaGetDevice(&device_id);
+//     if (status != cudaSuccess) {
+//         NVSHMEMI_WARN_PRINT("Failed to get current GPU device, using default clock freq\n");
+//         *gpu_clock_freq_ghz = 1.5f;  // 默认值
+//         return 0;
+//     }
 
-    // 获取时钟频率（KHz）
-    status = cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate, device_id);
-    if (status != cudaSuccess) {
-        NVSHMEMI_WARN_PRINT("Failed to query GPU clock rate, using default clock freq\n");
-        *gpu_clock_freq_ghz = 1.5f;  // 默认值
-        cudaGetLastError();  // 清除错误
-        return 0;
-    }
+//     // 获取时钟频率（KHz）
+//     status = cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate, device_id);
+//     if (status != cudaSuccess) {
+//         NVSHMEMI_WARN_PRINT("Failed to query GPU clock rate, using default clock freq\n");
+//         *gpu_clock_freq_ghz = 1.5f;  // 默认值
+//         cudaGetLastError();  // 清除错误
+//         return 0;
+//     }
 
-    // 转换为 GHz
-    *gpu_clock_freq_ghz = (float)clock_rate_khz / 1e6f;
+//     // 转换为 GHz
+//     *gpu_clock_freq_ghz = (float)clock_rate_khz / 1e6f;
 
-    return 0;
-}
+//     return 0;
+// }
 
-/**
- * 初始化故障检测参数
- * 读取环境变量并计算相关参数
- */
-static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state,
-                                             nvshmemi_ibgda_ft_state_t *ft_state_h) {
-    int status = 0;
-    struct nvshmemi_options_s *options = ibgda_state->options;
+// /**
+//  * 初始化故障检测参数
+//  * 读取环境变量并计算相关参数
+//  */
+// static int ibgda_init_fault_detection_params(nvshmemt_ibgda_state_t *ibgda_state,
+//                                              nvshmemi_ibgda_ft_state_t *ft_state_h) {
+//     int status = 0;
+//     struct nvshmemi_options_s *options = ibgda_state->options;
 
-    if (!ft_state_h) {
-        return 0;  // No fault tolerance state to initialize
-    }
+//     if (!ft_state_h) {
+//         return 0;  // No fault tolerance state to initialize
+//     }
 
-    // 从环境变量读取参数（已在 env_defs.h 中定义）
-    ft_state_h->failure_threshold = options->IBGDA_FAILURE_THRESHOLD;
-    ft_state_h->check_interval = options->IBGDA_CHECK_INTERVAL;
+//     // 从环境变量读取参数（已在 env_defs.h 中定义）
+//     ft_state_h->failure_threshold = options->IBGDA_FAILURE_THRESHOLD;
+//     ft_state_h->check_interval = options->IBGDA_CHECK_INTERVAL;
 
-    // 获取 GPU 时钟频率
-    float gpu_clock_freq_ghz = 0.0f;
-    status = ibgda_get_gpu_clock_freq(&gpu_clock_freq_ghz);
-    if (status) {
-        NVSHMEMI_WARN_PRINT("Failed to get GPU clock frequency\n");
-        gpu_clock_freq_ghz = 1.5f;  // 默认值
-    }
-    ft_state_h->gpu_clock_freq_ghz = gpu_clock_freq_ghz;
+//     // 获取 GPU 时钟频率
+//     float gpu_clock_freq_ghz = 0.0f;
+//     status = ibgda_get_gpu_clock_freq(&gpu_clock_freq_ghz);
+//     if (status) {
+//         NVSHMEMI_WARN_PRINT("Failed to get GPU clock frequency\n");
+//         gpu_clock_freq_ghz = 1.5f;  // 默认值
+//     }
+//     ft_state_h->gpu_clock_freq_ghz = gpu_clock_freq_ghz;
 
-    // 计算恢复间隔（转换为 GPU 时钟周期）
-    // recovery_interval_ms * gpu_clock_freq_ghz * 1e6 = cycles
-    uint32_t recovery_interval_ms = options->IBGDA_RECOVERY_INTERVAL;
-    ft_state_h->recovery_interval_cycles = 
-        (uint64_t)(recovery_interval_ms * gpu_clock_freq_ghz * 1e6f);
+//     // 计算恢复间隔（转换为 GPU 时钟周期）
+//     // recovery_interval_ms * gpu_clock_freq_ghz * 1e6 = cycles
+//     uint32_t recovery_interval_ms = options->IBGDA_RECOVERY_INTERVAL;
+//     ft_state_h->recovery_interval_cycles = 
+//         (uint64_t)(recovery_interval_ms * gpu_clock_freq_ghz * 1e6f);
 
-    INFO(ibgda_state->log_level,
-         "Fault detection parameters initialized:\n"
-         "  failure_threshold = %u\n"
-         "  recovery_interval = %u ms (%lu cycles)\n"
-         "  check_interval = %u\n"
-         "  gpu_clock_freq = %.2f GHz\n",
-         ft_state_h->failure_threshold,
-         recovery_interval_ms,
-         ft_state_h->recovery_interval_cycles,
-         ft_state_h->check_interval,
-         ft_state_h->gpu_clock_freq_ghz);
+//     INFO(ibgda_state->log_level,
+//          "Fault detection parameters initialized:\n"
+//          "  failure_threshold = %u\n"
+//          "  recovery_interval = %u ms (%lu cycles)\n"
+//          "  check_interval = %u\n"
+//          "  gpu_clock_freq = %.2f GHz\n",
+//          ft_state_h->failure_threshold,
+//          recovery_interval_ms,
+//          ft_state_h->recovery_interval_cycles,
+//          ft_state_h->check_interval,
+//          ft_state_h->gpu_clock_freq_ghz);
 
-    return 0;
-}
+//     return 0;
+// }
 
 static void ibgda_get_device_dct(nvshmemi_ibgda_device_dct_t *dev_dct,
                                  const struct ibgda_dct_handle *dct_handle,
@@ -2966,10 +2966,6 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
                 int dev_idx = ibgda_state->selected_dev_ids[j];
                 struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
                 int backup_dev_entry = ibgda_state->backup_dev_ids[dev_idx];
-                if (backup_dev_entry < 0) {
-                    NVSHMEMI_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                                       "backup_dev_entry is invalid for primary dev %d", dev_idx);
-                }
                 struct ibgda_device *backup_device =
                     (struct ibgda_device *)ibgda_state->devices + backup_dev_entry;
                 int backup_dev_slot = j;  // backup dev_idx in [primary, primary+1)
@@ -3091,17 +3087,17 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
         }
         ft_state_h->num_backup_devices = actual_backup_devs;
         ft_state_h->num_primary_devices = n_devs_selected;
-        ft_state_h->num_default_rc_per_pe = num_rc_handles / n_devs_selected / n_pes;
+        // ft_state_h->num_default_rc_per_pe = num_rc_handles / n_devs_selected / n_pes;
 
         // Initialize health management arrays for fault tolerance
-        status = ibgda_init_health_management_arrays(ibgda_state, t, num_rc_handles, ft_state_h);
-        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                              "ibgda_init_health_management_arrays failed.");
+        // status = ibgda_init_health_management_arrays(ibgda_state, t, num_rc_handles, ft_state_h);
+        // NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+        //                       "ibgda_init_health_management_arrays failed.");
 
         // Initialize fault detection parameters
-        status = ibgda_init_fault_detection_params(ibgda_state, ft_state_h);
-        NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                              "ibgda_init_fault_detection_params failed.");
+        // status = ibgda_init_fault_detection_params(ibgda_state, ft_state_h);
+        // NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
+        //                       "ibgda_init_fault_detection_params failed.");
 
         // Allocate device-side ft state and copy
         status = cudaMalloc(&ft_state_d, sizeof(nvshmemi_ibgda_ft_state_t));
@@ -3885,10 +3881,10 @@ int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
             cudaMemcpy(&ft_state_h, ibgda_device_state_h->ff, sizeof(ft_state_h), cudaMemcpyDeviceToHost);
             if (ft_state_h.backup_rcs) cudaFree(ft_state_h.backup_rcs);
             if (ft_state_h.backup_cqs) cudaFree(ft_state_h.backup_cqs);
-            if (ft_state_h.rc_health_status) cudaFree(ft_state_h.rc_health_status);
-            if (ft_state_h.rc_failure_count) cudaFree(ft_state_h.rc_failure_count);
-            if (ft_state_h.rc_last_check_time) cudaFree(ft_state_h.rc_last_check_time);
-            if (ft_state_h.rc_switch_time) cudaFree(ft_state_h.rc_switch_time);
+            // if (ft_state_h.rc_health_status) cudaFree(ft_state_h.rc_health_status);
+            // if (ft_state_h.rc_failure_count) cudaFree(ft_state_h.rc_failure_count);
+            // if (ft_state_h.rc_last_check_time) cudaFree(ft_state_h.rc_last_check_time);
+            // if (ft_state_h.rc_switch_time) cudaFree(ft_state_h.rc_switch_time);
             cudaFree(ibgda_device_state_h->ff);
         }
     }
