@@ -103,6 +103,8 @@ NVSHMEMI_ENV_DEF(LIBFABRIC_PROVIDER, string, "cxi", NVSHMEMI_ENV_CAT_TRANSPORT,
 NVSHMEMI_ENV_DEF(IBGDA_ENABLE_MULTI_PORT, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Enable multiple NICs per PE if available. Note: Enabling this on "
                  "Hopper+ for latency sensitive applications is discouraged.")
+NVSHMEMI_ENV_DEF(IBGDA_ENABLE_FAULT_TOLERANCE, bool, false, NVSHMEMI_ENV_CAT_TRANSPORT,
+                 "Enable IBGDA fault tolerance (backup RC/CQ creation). Requires multi-port NIC selection.")
 NVSHMEMI_ENV_DEF(IBGDA_NUM_DCT, int, 2, NVSHMEMI_ENV_CAT_TRANSPORT,
                  "Number of DCT QPs used in GPU-initiated communication transport.")
 NVSHMEMI_ENV_DEF(IBGDA_NUM_DCI, int, 1, NVSHMEMI_ENV_CAT_TRANSPORT,
