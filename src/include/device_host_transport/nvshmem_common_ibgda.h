@@ -7,6 +7,7 @@
 #ifndef _NVSHMEMI_IBGDA_COMMON_H_
 #define _NVSHMEMI_IBGDA_COMMON_H_
 
+#include <cstdint>
 #define NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING 24
 #define NVSHMEMI_IBGDA_STATE_PADDING 64
 
@@ -200,8 +201,10 @@ typedef struct nvshmemi_ibgda_device_qp {
         uint64_t *prod_idx;
     } tx_wq;
     nvshmemi_ibgda_device_qp_management_v1 mvars;  // management variables
+    uint64_t spn; // for deepep fault tolerance debug
+    uint64_t iid; // for deepep fault tolerance debug
 } nvshmemi_ibgda_device_qp_v1;
-static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 184, "ibgda_device_qp_v1 must be 184 bytes.");
+static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 200, "ibgda_device_qp_v1 must be 200 bytes.");
 
 typedef nvshmemi_ibgda_device_qp_v1 nvshmemi_ibgda_device_qp_t;
 
