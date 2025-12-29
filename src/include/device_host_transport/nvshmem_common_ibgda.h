@@ -223,34 +223,12 @@ static_assert(sizeof(nvshmemi_ibgda_device_local_only_mhandle_v1) == 96,
 
 typedef nvshmemi_ibgda_device_local_only_mhandle_v1 nvshmemi_ibgda_device_local_only_mhandle_t;
 
-// QP health status for fault tolerance
-typedef enum {
-    IBGDA_QP_HEALTH_GOOD = 0,
-    IBGDA_QP_HEALTH_SUSPECTED = 1,
-    IBGDA_QP_HEALTH_FAILED = 2,
-    IBGDA_QP_HEALTH_RECOVERING = 3
-} ibgda_qp_health_status_t;
-
 typedef struct {
-    // Backup RC connections
     uint32_t num_backup_rc_per_pe;
-    // int num_default_rc_per_pe;
     int num_primary_devices;
     int num_backup_devices;
     nvshmemi_ibgda_device_qp_t *backup_rcs;
     nvshmemi_ibgda_device_cq_t *backup_cqs;
-    
-    // // Health monitoring (per RC connection)
-    // uint8_t *rc_health_status;
-    // uint32_t *rc_failure_count;
-    // uint64_t *rc_last_check_time;
-    // uint64_t *rc_switch_time;
-    
-    // // Configuration parameters
-    // uint64_t recovery_interval_cycles;
-    // uint32_t failure_threshold;
-    // uint32_t check_interval;
-    // float gpu_clock_freq_ghz;
 } nvshmemi_ibgda_ft_state_t;
 
 // This is a stable structure.
