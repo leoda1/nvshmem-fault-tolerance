@@ -595,17 +595,14 @@ int nvshmemt_ibgda_get_mem_handle(nvshmem_mem_handle_t *mem_handle, void *buf, s
     handle->num_backup_devs = 0;
     if (ibgda_state->fault_tolerance_enabled && ibgda_state->backup_dev_ids) {
         for (int i = 0; i < n_devs_selected; ++i) {
-            int backup_entry_idx = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
-            if (backup_entry_idx < 0) {
+            int backup_dev_id = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
+            if (backup_dev_id < 0) {
                 continue;
             }
 
             int total_used = handle->num_devs + handle->num_backup_devs;
             assert(total_used < NVSHMEMI_IBGDA_MAX_DEVICES_PER_PE);
 
-            // `backup_entry_idx` is an entry index into the selected/dev list. Map it
-            // to the actual device id stored in `dev_ids` before indexing `devices`.
-            int backup_dev_id = ibgda_state->dev_ids[backup_entry_idx];
             struct ibgda_device *backup_device =
                 ((struct ibgda_device *)ibgda_state->devices + backup_dev_id);
             nvshmem_mem_handle_t *backup_handle =
@@ -2817,40 +2814,39 @@ static int ibgda_setup_gpu_state(nvshmem_transport_t t) {
                 int arr_idx = arr_offset + j;
                 int dev_idx = ibgda_state->selected_dev_ids[j];
                 struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
-                int backup_dev_entry = ibgda_state->backup_dev_ids[dev_idx];
-                int backup_dev_id = (backup_dev_entry >= 0) ? ibgda_state->dev_ids[backup_dev_entry] : -1;
+                int backup_dev_id = ibgda_state->backup_dev_ids[dev_idx];
                 struct ibgda_device *backup_device =
                     (backup_dev_id >= 0) ? ((struct ibgda_device *)ibgda_state->devices + backup_dev_id) : NULL;
                 int backup_dev_slot = j;  // backup dev_idx in [primary, primary+1)
                 uintptr_t base_mvars_d_addr = (uintptr_t)(&backup_rc_d[arr_idx]) + mvars_offset;
 
                 // Debug: print backup NIC mapping to verify it differs from primary
-                if (backup_device) {
-                    const char *backup_dev_name = ftable.get_device_name(backup_device->dev);
-                    char *backup_pci_path = NULL;
-                    if (get_pci_path(backup_dev_entry, &backup_pci_path, t) == 0 && backup_pci_path) {
-                        printf("[PE %d] Backup RC QP uses backup NIC entry=%d dev_id=%d name=%s pci=%s\n",
-                               mype, backup_dev_entry, backup_dev_id,
-                               backup_dev_name ? backup_dev_name : "(null)", backup_pci_path);
-                        free(backup_pci_path);
-                    } else {
-                        printf("[PE %d] Backup RC QP uses backup NIC entry=%d dev_id=%d name=%s (pci path unavailable)\n",
-                               mype, backup_dev_entry, backup_dev_id,
-                               backup_dev_name ? backup_dev_name : "(null)");
-                    }
-                } else {
-                    printf("[PE %d] Backup RC QP creation skipped: invalid backup_dev_id for primary_dev_id=%d\n",
-                           mype, dev_idx);
-                    continue;
-                }
+                // if (backup_device) {
+                //     const char *backup_dev_name = ftable.get_device_name(backup_device->dev);
+                //     char *backup_pci_path = NULL;
+                //     if (get_pci_path(backup_dev_entry, &backup_pci_path, t) == 0 && backup_pci_path) {
+                //         printf("[PE %d] Backup RC QP uses backup NIC entry=%d dev_id=%d name=%s pci=%s\n",
+                //                mype, backup_dev_entry, backup_dev_id,
+                //                backup_dev_name ? backup_dev_name : "(null)", backup_pci_path);
+                //         free(backup_pci_path);
+                //     } else {
+                //         printf("[PE %d] Backup RC QP uses backup NIC entry=%d dev_id=%d name=%s (pci path unavailable)\n",
+                //                mype, backup_dev_entry, backup_dev_id,
+                //                backup_dev_name ? backup_dev_name : "(null)");
+                //     }
+                // } else {
+                //     printf("[PE %d] Backup RC QP creation skipped: invalid backup_dev_id for primary_dev_id=%d\n",
+                //            mype, dev_idx);
+                //     continue;
+                // }
 
                 // Use n_devs_selected + j as dev_idx for backup QPs so they index into
                 // the backup portion of lkeys/rkeys tables (indices [n_devs_selected, total_devs))
                 // Pass device (primary device) as primary_device_ref to access backup_peer_ep_handles
                 // Calculate correct ep_idx for backup_peer_ep_handles: i / n_devs_selected gives the RC index
                 // which matches the backup_peer_ep_handles array indexing (rc_idx = dst_pe * num_rc_eps_per_pe + offset)
-                int backup_ep_idx = i / n_devs_selected;
-                ibgda_get_device_qp(&backup_rc_h[arr_idx], backup_device, device->rc.backup_eps[i], backup_ep_idx,
+                // int backup_ep_idx = i;
+                ibgda_get_device_qp(&backup_rc_h[arr_idx], backup_device, device->rc.backup_eps[i], i,
                                     n_devs_selected + backup_dev_slot, device);
 
                 backup_rc_h[arr_idx].tx_wq.cq = &backup_cq_d[backup_cq_idx];
@@ -3206,12 +3202,17 @@ int nvshmemt_ibgda_connect_endpoints(nvshmem_transport_t t, int *selected_dev_id
 
     primary_dev_idx = (total_selected_entries > 0) ? selected_dev_ids[0] : -1;
     if (fault_tolerance_enabled && backup_entry_idx >= 0 && primary_dev_idx >= 0) {
-        ibgda_state->backup_dev_ids[primary_dev_idx] = backup_entry_idx;
-        ibgda_state->backup_port_ids[primary_dev_idx] = ibgda_state->port_ids[backup_entry_idx];
+        /* Store physical backup device/port IDs (not entry indices) so later lookups
+         * do not remap via dev_ids again, which can select the wrong NIC/GID. */
+        const int backup_dev_id = ibgda_state->dev_ids[backup_entry_idx];
+        const int backup_port_id = ibgda_state->port_ids[backup_entry_idx];
+
+        ibgda_state->backup_dev_ids[primary_dev_idx] = backup_dev_id;
+        ibgda_state->backup_port_ids[primary_dev_idx] = backup_port_id;
         ibgda_state->is_single_port_card[primary_dev_idx] = false;
         INFO(ibgda_state->log_level,
-             "Manual backup assignment: primary_idx=%d -> backup_idx=%d",
-             primary_dev_idx, backup_entry_idx);
+             "Manual backup assignment: primary_dev=%d -> backup_dev=%d (port %d)",
+             primary_dev_idx, backup_dev_id, backup_port_id);
     }
 
     if (fault_tolerance_enabled && total_selected_entries > 0) {
