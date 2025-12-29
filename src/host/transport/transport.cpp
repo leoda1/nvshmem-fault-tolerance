@@ -2,8 +2,9 @@
  * Copyright (c) 2016-2025, NVIDIA CORPORATION. All rights reserved.
  *
  * See License.txt for license information
- */
+*/
 
+#include <algorithm>                                                       // for min, max
 #include <assert.h>                                                        // for assert
 #include <dlfcn.h>                                                         // for dlclose, dlerror
 #include <stdint.h>                                                        // for SIZE_MAX
@@ -360,6 +361,16 @@ out:
     return status;
 }
 
+static int nvshmemi_pick_adjacent_nic(int primary, int total) {
+    if (total < 2 || primary < 0) return -1;
+    int candidate = (primary % 2 == 0) ? primary + 1 : primary - 1;
+    if (candidate >= 0 && candidate < total) return candidate;
+    candidate = primary - 1;
+    if (candidate >= 0) return candidate;
+    candidate = (primary + 1) % total;
+    return (candidate != primary) ? candidate : -1;
+}
+
 int nvshmemi_setup_connections(nvshmemi_state_t *state) {
     int status = 0;
     nvshmem_transport_t *transports = (nvshmem_transport_t *)state->transports;
@@ -372,10 +383,19 @@ int nvshmemi_setup_connections(nvshmemi_state_t *state) {
         if (!(tcurr->attr & NVSHMEM_TRANSPORT_ATTR_CONNECTED)) {
             continue;
         }
+        const bool ibgda_backup =
+    #ifdef NVSHMEM_IBGDA_SUPPORT
+            (tcurr->type == NVSHMEM_TRANSPORT_LIB_CODE_IBGDA) &&
+            nvshmemi_options.IBGDA_ENABLE_FAULT_TOLERANCE &&
+            nvshmemi_options.IBGDA_ENABLE_MULTI_PORT && tcurr->n_devices > 1;
+    #else
+            false;
+    #endif
 
         int devices_temp = tcurr->n_devices / state->npes_node;
         if (devices_temp == 0) devices_temp = 1;
-        const int max_devices_per_pe = devices_temp;
+        const int max_devices_per_pe = ibgda_backup ? std::min(tcurr->n_devices, 2)
+                                                    : devices_temp;
         int selected_devices[max_devices_per_pe];
         int found_devices = 0;
 
@@ -414,6 +434,18 @@ int nvshmemi_setup_connections(nvshmemi_state_t *state) {
          */
         if (tcurr->n_devices > 0 && selected_devices[0] == -1) {
             NVSHMEMI_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "No devices selected.\n");
+        }
+
+        if (ibgda_backup && found_devices > 0 && found_devices < max_devices_per_pe) {
+            const int backup_dev =
+                nvshmemi_pick_adjacent_nic(selected_devices[0], tcurr->n_devices);
+            if (backup_dev >= 0) {
+                selected_devices[found_devices++] = backup_dev;
+                INFO(NVSHMEM_INIT, "IBGDA backup NIC mapping: primary %d backup %d",
+                     selected_devices[0], backup_dev);
+            } else {
+                WARN("IBGDA multi-port requested but no adjacent NIC found; backup disabled.");
+            }
         }
 
         status = tcurr->host_ops.connect_endpoints(tcurr, selected_devices, found_devices);

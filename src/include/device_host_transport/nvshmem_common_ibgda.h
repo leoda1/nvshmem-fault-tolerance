@@ -7,6 +7,7 @@
 #ifndef _NVSHMEMI_IBGDA_COMMON_H_
 #define _NVSHMEMI_IBGDA_COMMON_H_
 
+#include <cstdint>
 #define NVSHMEMI_IBGDA_QP_MANAGEMENT_PADDING 24
 #define NVSHMEMI_IBGDA_STATE_PADDING 64
 
@@ -200,8 +201,10 @@ typedef struct nvshmemi_ibgda_device_qp {
         uint64_t *prod_idx;
     } tx_wq;
     nvshmemi_ibgda_device_qp_management_v1 mvars;  // management variables
+    uint64_t spn; // for deepep fault tolerance debug
+    uint64_t iid; // for deepep fault tolerance debug
 } nvshmemi_ibgda_device_qp_v1;
-static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 184, "ibgda_device_qp_v1 must be 184 bytes.");
+static_assert(sizeof(nvshmemi_ibgda_device_qp_v1) == 200, "ibgda_device_qp_v1 must be 200 bytes.");
 
 typedef nvshmemi_ibgda_device_qp_v1 nvshmemi_ibgda_device_qp_t;
 
@@ -222,30 +225,32 @@ typedef nvshmemi_ibgda_device_local_only_mhandle_v1 nvshmemi_ibgda_device_local_
 
 // QP health status for fault tolerance
 typedef enum {
-    IBGDA_QP_HEALTH_GOOD = 0,        // QP 健康，使用主 QP
-    IBGDA_QP_HEALTH_SUSPECTED = 1,   // 检测到失败，但未达到阈值
-    IBGDA_QP_HEALTH_FAILED = 2,      // 已切换到备份 QP
-    IBGDA_QP_HEALTH_RECOVERING = 3   // 正在尝试切回主 QP
+    IBGDA_QP_HEALTH_GOOD = 0,
+    IBGDA_QP_HEALTH_SUSPECTED = 1,
+    IBGDA_QP_HEALTH_FAILED = 2,
+    IBGDA_QP_HEALTH_RECOVERING = 3
 } ibgda_qp_health_status_t;
 
 typedef struct {
     // Backup RC connections
-    uint32_t num_backup_rc_per_pe;               // 每个 PE 的备份 RC 数量
-    int num_default_rc_per_pe;                   // 默认 RC 数量（用于恢复）
-    nvshmemi_ibgda_device_qp_t *backup_rcs;      // 备份 RC QP 数组
-    nvshmemi_ibgda_device_cq_t *backup_cqs;      // 备份 CQ 数组
+    uint32_t num_backup_rc_per_pe;
+    // int num_default_rc_per_pe;
+    int num_primary_devices;
+    int num_backup_devices;
+    nvshmemi_ibgda_device_qp_t *backup_rcs;
+    nvshmemi_ibgda_device_cq_t *backup_cqs;
     
-    // Health monitoring (per RC connection)
-    uint8_t *rc_health_status;                   // ibgda_qp_health_status_t
-    uint32_t *rc_failure_count;                  // 连续失败计数
-    uint64_t *rc_last_check_time;                // 上次检查时间（clock64 周期数）
-    uint64_t *rc_switch_time;                    // 切换时间戳
+    // // Health monitoring (per RC connection)
+    // uint8_t *rc_health_status;
+    // uint32_t *rc_failure_count;
+    // uint64_t *rc_last_check_time;
+    // uint64_t *rc_switch_time;
     
-    // Configuration parameters
-    uint64_t recovery_interval_cycles;           // 恢复重试间隔（GPU 时钟周期）
-    uint32_t failure_threshold;                  // 连续失败多少次触发切换
-    uint32_t check_interval;                     // 每隔多少次操作检查一次 CQ
-    float gpu_clock_freq_ghz;                    // GPU 时钟频率
+    // // Configuration parameters
+    // uint64_t recovery_interval_cycles;
+    // uint32_t failure_threshold;
+    // uint32_t check_interval;
+    // float gpu_clock_freq_ghz;
 } nvshmemi_ibgda_ft_state_t;
 
 // This is a stable structure.
