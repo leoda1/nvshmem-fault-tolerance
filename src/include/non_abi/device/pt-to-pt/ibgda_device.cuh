@@ -1860,6 +1860,129 @@ __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_q
         return ibgda_get_dci(pe, out_shared_among_ctas);
 }
 
+// Fault tolerance support functions
+#define IBGDA_FAULT_TOLERANCE_ENABLED (ibgda_get_state()->ff != nullptr)
+
+// Per-PE primary QP bad flag: deep_ep_ibgda_primary_bad[pe] indicates if primary QP to that PE is bad
+// Maximum 32 PEs supported (using uint32_t bitmask would be more efficient but array is simpler)
+extern __device__ uint32_t deep_ep_ibgda_primary_bad[32];
+
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE bool deep_ep_ibgda_primary_is_bad(int pe) {
+    if (pe < 0 || pe >= 32) {
+        printf("deep_ep_ibgda_primary_is_bad: pe=%d is out of range\n", pe);
+        return false;  // Safety check
+    }
+    return ibgda_atomic_read(&deep_ep_ibgda_primary_bad[pe]) != 0;
+}
+
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_backup_rc(
+    int pe, bool *out_shared_among_ctas) {
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+    uint32_t id;
+    uint32_t idx;
+    uint32_t dev_offset;
+    uint32_t warpid = nvshmemi_thread_id_in_block() / nvshmemi_warp_size();
+
+    assert(pe != nvshmemi_device_state_d.mype);
+    assert(state->ff != nullptr);
+
+    switch (state->rc_map_type) {
+        case NVSHMEMI_IBGDA_DEVICE_QP_MAP_TYPE_CTA:
+            id = ibgda_get_ctaid();
+            break;
+        case NVSHMEMI_IBGDA_DEVICE_QP_MAP_TYPE_SM:
+            id = ibgda_get_smid();
+            break;
+        case NVSHMEMI_IBGDA_DEVICE_QP_MAP_TYPE_WARP:
+            id = ibgda_get_ctaid() * nvshmemi_block_size() / nvshmemi_warp_size() + warpid;
+            break;
+        default:
+            assert(0);
+            break;
+    }
+
+    dev_offset = ++state->globalmem.qp_group_switches[id % state->num_qp_groups];
+
+    /* round down */
+    id = id / state->num_devices_initialized;
+    id = (id * state->num_devices_initialized) + (dev_offset % state->num_devices_initialized);
+
+    const int num_primary = state->ff->num_primary_devices;
+    const int stride = state->ff->num_backup_rc_per_pe * num_primary;
+    const int offset = id % stride;
+
+    idx = pe * stride + offset;
+
+    *out_shared_among_ctas = true;
+    return &state->ff->backup_rcs[idx];
+}
+
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE nvshmemi_ibgda_device_qp_t *ibgda_get_backup_qp(
+    int pe, bool *out_shared_among_ctas) {
+    nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
+
+    if (ibgda_is_rc_enabled() && pe != nvshmemi_device_state_d.mype)
+        return ibgda_get_backup_rc(pe, out_shared_among_ctas);
+    else
+        // Backup QP is only for RC, not DCI
+        return ibgda_get_dci(pe, out_shared_among_ctas);
+}
+
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE uint64_t ibgda_get_clock_cycles() {
+#ifdef NVSHMEM_TIMEOUT_DEVICE_POLLING
+    return ibgda_query_globaltimer();
+#else
+    return clock64();
+#endif
+}
+
+// Check if WQE completed, blocking wait with timeout.
+// Returns true if timeout (caller should switch to backup), false if success.
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE bool nvshmemi_ibgda_check_cq(
+    nvshmemi_ibgda_device_cq_t *cq, uint64_t expected_wqe_idx, uint32_t /*primary_dev_idx*/,
+    int target_pe = -1) {
+    if (cq == nullptr || cq->cqe == nullptr) {
+        return true;  // No CQ = failure
+    }
+    const auto cqe64 = static_cast<struct mlx5_cqe64 *>(cq->cqe);
+    const uint32_t ncqes = cq->ncqes;
+    IBGDA_MFENCE();
+    if (ibgda_atomic_read(cq->cons_idx) >= expected_wqe_idx) {
+        return false;  // Already completed
+    }
+
+    constexpr uint64_t kTimeoutCycles = static_cast<uint64_t>(10.0 * 1.5e9);
+    uint64_t start_time = ibgda_get_clock_cycles();
+    uint16_t wqe_counter;
+    do {
+        wqe_counter = ibgda_atomic_read(&cqe64->wqe_counter);
+        wqe_counter = BSWAP16(wqe_counter);
+        // Check if completed (same logic as ibgda_poll_cq)
+        if ((static_cast<uint16_t>(static_cast<uint16_t>(expected_wqe_idx) - wqe_counter -
+                                    static_cast<uint16_t>(2)) >= ncqes)) {
+            // Completed successfully, update cons_idx like poll_cq
+            atomicMax((unsigned long long int *)cq->cons_idx,
+                      (unsigned long long int)expected_wqe_idx);
+            IBGDA_MFENCE();
+            return false;  // Success
+        }
+
+        // Check timeout
+        if ((ibgda_get_clock_cycles() - start_time) > kTimeoutCycles) {
+            printf("[%d] Timeout: target_pe=%d, expected_wqe_idx=%llu\n",
+                   nvshmemi_device_state_d.mype, target_pe, expected_wqe_idx);
+            if (target_pe >= 0 && target_pe < 32) {
+                WRITE_ONCE(deep_ep_ibgda_primary_bad[target_pe], 1u);
+            }
+            // Update cons_idx on timeout (like poll_cq)
+            atomicMax((unsigned long long int *)cq->cons_idx,
+                      (unsigned long long int)expected_wqe_idx);
+            IBGDA_MFENCE();
+            return true;  // Timeout = failure
+        }
+    } while (true);
+}
+
 __device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void ibgda_get_lkey(
     uint64_t addr, __be32 *lkey, size_t *chunk_size, bool *is_sysmem_scope, uint32_t dev_idx) {
     nvshmemi_ibgda_device_state_t *state = ibgda_get_state();
@@ -2875,18 +2998,30 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_ibgda_amo_nonfetch_impl(v
 
     bool can_coalesce_warp = ibgda_can_coalesce_warp_pe(amask, pe);
 
+    nvshmemi_ibgda_device_qp_t *primary_qp = nullptr;
     if (can_coalesce_warp) {
         my_tid = nvshmemi_thread_id_in_threadgroup<NVSHMEMI_THREADGROUP_WARP>();
         tg_size = nvshmemi_threadgroup_size<NVSHMEMI_THREADGROUP_WARP>();
         if (my_tid == 0) {
-            qp = ibgda_get_qp(pe, (bool *)&is_qp_shared_among_ctas);
+            primary_qp = ibgda_get_qp(pe, (bool *)&is_qp_shared_among_ctas);
+            if (IBGDA_FAULT_TOLERANCE_ENABLED && deep_ep_ibgda_primary_is_bad(pe)) {
+                qp = ibgda_get_backup_qp(pe, (bool *)&is_qp_shared_among_ctas);
+            } else {
+                qp = primary_qp;
+            }
         }
         qp = (nvshmemi_ibgda_device_qp_t *)__shfl_sync(IBGDA_FULL_WARP, (uintptr_t)qp, 0);
         is_qp_shared_among_ctas = __shfl_sync(IBGDA_FULL_WARP, is_qp_shared_among_ctas, 0);
+        primary_qp = (nvshmemi_ibgda_device_qp_t *)__shfl_sync(IBGDA_FULL_WARP, (uintptr_t)primary_qp, 0);
     } else {
         my_tid = nvshmemi_thread_id_in_threadgroup<NVSHMEMI_THREADGROUP_THREAD>();
         tg_size = nvshmemi_threadgroup_size<NVSHMEMI_THREADGROUP_THREAD>();
-        qp = ibgda_get_qp(pe, (bool *)&is_qp_shared_among_ctas);
+        primary_qp = ibgda_get_qp(pe, (bool *)&is_qp_shared_among_ctas);
+        if (IBGDA_FAULT_TOLERANCE_ENABLED && deep_ep_ibgda_primary_is_bad(pe)) {
+            qp = ibgda_get_backup_qp(pe, (bool *)&is_qp_shared_among_ctas);
+        } else {
+            qp = primary_qp;
+        }
     }
     dct = ibgda_get_dct(pe, qp->dev_idx);
     ibgda_get_raddr_rkey((uint64_t)rptr, pe, pe, &raddr, &rkey, &rchunk_size, qp->dev_idx);
@@ -2929,6 +3064,51 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_ibgda_amo_nonfetch_impl(v
             ibgda_submit_requests<true>(qp, base_wqe_idx, num_wqes);
         else
             ibgda_submit_requests<false>(qp, base_wqe_idx, num_wqes);
+
+        // Check if backup is needed (only when using primary QP and fault tolerance is enabled)
+        bool need_backup = false;
+        if (IBGDA_FAULT_TOLERANCE_ENABLED && qp == primary_qp) {
+            uint64_t completion_idx = base_wqe_idx + num_wqes;
+            need_backup = nvshmemi_ibgda_check_cq(qp->tx_wq.cq, completion_idx, qp->dev_idx, pe);
+        }
+
+        if (need_backup) {
+            // Retry with backup QP
+            nvshmemi_ibgda_device_qp_t *backup_qp = ibgda_get_backup_qp(pe, (bool *)&is_qp_shared_among_ctas);
+            nvshmemi_ibgda_device_dct_t *backup_dct = ibgda_get_dct(pe, backup_qp->dev_idx);
+            __be32 backup_rkey;
+            uint64_t backup_raddr;
+            size_t backup_rchunk_size;
+            ibgda_get_raddr_rkey((uint64_t)rptr, pe, pe, &backup_raddr, &backup_rkey, &backup_rchunk_size, backup_qp->dev_idx);
+
+            uint64_t backup_base_wqe_idx = ibgda_reserve_wqe_slots(backup_qp, num_wqes, is_qp_shared_among_ctas);
+            uint64_t backup_my_wqe_idx = backup_base_wqe_idx + (my_tid * num_wqes_per_cmd);
+
+            void *backup_wqe_ptrs[2];
+            backup_wqe_ptrs[0] = ibgda_get_wqe_ptr(backup_qp, backup_my_wqe_idx);
+            backup_wqe_ptrs[1] = ibgda_get_wqe_ptr(backup_qp, backup_my_wqe_idx + 1);
+
+            ibgda_write_atomic_wqe<support_half_av_seg>(backup_qp, backup_dct, &value, NULL, (uint64_t)backup_qp->ibuf.buf,
+                                                        backup_qp->ibuf.lkey, backup_raddr, backup_rkey, sizeof(T), backup_my_wqe_idx,
+                                                        op, fm_ce_se, backup_wqe_ptrs);
+
+            if (need_additional_wqe) {
+                backup_my_wqe_idx += num_wqes_per_cmd;
+                backup_wqe_ptrs[0] = ibgda_get_wqe_ptr(backup_qp, backup_my_wqe_idx);
+                ibgda_write_nop_wqe(backup_qp, backup_my_wqe_idx, backup_wqe_ptrs);
+            }
+
+            if (is_qp_shared_among_ctas)
+                ibgda_submit_requests<true>(backup_qp, backup_base_wqe_idx, num_wqes);
+            else
+                ibgda_submit_requests<false>(backup_qp, backup_base_wqe_idx, num_wqes);
+
+            uint64_t backup_completion_idx = backup_base_wqe_idx + num_wqes;
+            nvshmemi_ibgda_check_cq(backup_qp->tx_wq.cq, backup_completion_idx, backup_qp->dev_idx, pe);
+            if (nvshmemi_device_state_d.mype == 1) {
+                printf("TRACE-nvshmem-ff: mype=%d nvshmemi_ibgda_amo_nonfetch_impl use backup QP and success EXIT with pe=%d op=%d\n", nvshmemi_device_state_d.mype, pe, op);
+            }
+        }
     }
 
     if (can_coalesce_warp) nvshmemi_warp_sync();

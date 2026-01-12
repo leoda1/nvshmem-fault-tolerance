@@ -23,7 +23,9 @@
 
 #ifdef NVSHMEM_IBGDA_SUPPORT
 #include "device_host_transport/nvshmem_common_ibgda.h"
+#include "non_abi/device/pt-to-pt/ibgda_device.cuh"
 __constant__ __attribute__((used)) nvshmemi_ibgda_device_state_t nvshmemi_ibgda_device_state_d;
+__device__ uint32_t deep_ep_ibgda_primary_bad[32] = {0};
 #endif
 
 nvshmemi_device_state_t nvshmemi_device_only_state;
